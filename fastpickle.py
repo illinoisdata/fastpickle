@@ -35,6 +35,7 @@ import re
 import io
 import codecs
 import _compat_pickle
+from collections.abc import Collection
 
 __all__ = ["PickleError", "PicklingError", "UnpicklingError", "Pickler",
            "Unpickler", "dump", "dumps", "load", "loads"]
@@ -458,6 +459,9 @@ class _Pickler:
         self.write = self.framer.write
         self._write_large_bytes = self.framer.write_large_bytes
         self.memo = {}
+        self.threads_access = {} # maps id(obj) -> threads which accessed obj in the order accessed
+        self.local_memo = {} # for each thread, stores the number of items memoized in that thread.
+        self.r_memo = {}  # reverse memo, maps idx of memo -> thread_num, local_memo[thread_num]
         self.proto = int(protocol)
         self.bin = protocol >= 1
         self.fast = 0
@@ -488,6 +492,193 @@ class _Pickler:
         self.write(STOP)
         self.framer.end_framing()
 
+    def pardumps(self, obj, pickling_order):
+        """ Customized dumps() for parallelization. 
+            obj : list of [list | set | dict]
+            pickling_order : list containing the order in which the children of obj will be pickled
+            
+            Returns :
+            a bytecode such that pickle.dumps(obj) == pickle.pardumps(obj)
+        """
+        
+        if not hasattr(self, "_file_write"):
+            raise PicklingError("Pickler.__init__() was not called by "
+                                "%s.__init__()" % (self.__class__.__name__,))
+        if self.proto >= 2:
+            self.write(PROTO + pack("<B", self.proto))
+        if self.proto >= 4:
+            self.framer.start_framing()
+
+        assert len(obj) == len(pickling_order)
+
+        # dummy element, -1 can never be the id of an object
+        self.memo[-1] = None
+
+        self.pickling_order = pickling_order
+        self.child_bytes = [0] * len(obj)
+        for i, v in enumerate(pickling_order):
+            self.thread_num = v
+            sp = self.framer.current_frame.tell()
+            self.save(obj[v])
+            self.child_bytes[v] = self.framer.current_frame.getvalue()[sp:]
+        
+        print("self.child_bytes",self.child_bytes)
+        print("self.threads_access", self.threads_access)
+        print("self.memo",self.memo)
+        print("self.local_memo", self.local_memo)
+
+        collection_opcodes = {
+                'list': {
+                    'start': EMPTY_LIST,    
+                    'end': APPENDS 
+                },
+                'set': {
+                    'start': EMPTY_SET,
+                    'end': ADDITEMS
+                },
+                'dict': {
+                    'start': EMPTY_DICT,
+                    'end': SETITEMS
+                },
+
+            }
+        
+        int_types = [INT, BININT, BININT1, LONG, BININT2]
+        
+        self.old_to_new_binget = {}
+
+        def swap_defn(target_id, source_id, offset, binget_code, collection_type):
+            """
+            Function to extract definition from source and substitute it in target bytecode and vice versa.
+
+            target: The target bytecode which should contain the definition.
+            source: The source bytecode from which to extract a definition.
+            offset: Offset at which to swap the definition.
+            binget_code: The idx for the object in the memo.
+            collection_type: A string specifying the type of collection (e.g., 'list', 'set').
+            return: Modified target and source bytecodes.
+            """
+            # print("offset", offset)
+
+            target = self.child_bytes[target_id]
+            source = self.child_bytes[source_id]
+            
+            end_opcodes_list = [APPENDS, ADDITEMS, SETITEMS]
+
+            if collection_type not in collection_opcodes:
+                raise ValueError(f"Unsupported collection type: {collection_type}")
+
+            start_opcode = collection_opcodes[collection_type]['start']
+            end_opcode = collection_opcodes[collection_type]['end']
+            
+            
+            binget_code = binget_code.to_bytes()
+            defn = b''
+            count_of_x94 = 0
+            source = [*map(bytes, zip(source))]
+            
+            # Extract the definition from source, replace it with binget
+            for i, b in enumerate(source):
+                if b == MEMOIZE and i-1>=0 and source[i-1] not in int_types:  # MEMOIZE
+                    count_of_x94 += 1
+                    if count_of_x94 == offset:
+                        j = i + 2
+                        count_of_mark = 1
+                        defn = source[i - 1] + MEMOIZE + MARK  # Starting Opcode + MEMOIZE + MARK
+                        while count_of_mark != 0 and j < len(source):
+
+                            # handling strings
+                            if source[j] == SHORT_BINUNICODE and source[j-1] not in int_types:
+                                defn += source[j]
+                                j+=1
+                                while(source[j]!=MEMOIZE): # could be a source of error if MEMOIZE is actually part of the string
+                                    defn += source[j]
+                                    j+=1
+                        
+                            if source[j] == MARK and source[j-1] not in int_types:
+                                count_of_mark += 1
+                            elif (source[j] == APPENDS or source[j] == ADDITEMS or source[j] == SETITEMS) and j-1>=0 and source[j-1] not in int_types:
+                                # print("hiii",source[j-1], source[j], j, source[j-10:j+10])
+                                count_of_mark -= 1
+                            defn += source[j]
+                            j += 1
+                        
+                        source = source[:i - 1] + [b'h', binget_code] + source[j:]
+                        break
+
+            # Replacing the binget reference with the extracted definition
+            target = [*map(bytes, zip(target))]
+            target_offset = 0
+            for i, b in enumerate(target):
+                if b == MEMOIZE:
+                    target_offset+=1
+                if b == b'h' and target[i + 1] == binget_code:
+                    target = target[:i] + [*map(bytes, zip(defn))] + target[i + 2:]
+                    break
+            
+            actual_binget_target = 1
+            for i in range(0, target_num):
+                if i not in self.local_memo:
+                    # this happens if the child is not of collection type
+                    continue
+                actual_binget_target += self.local_memo[i]
+            actual_binget_target += target_offset
+            self.old_to_new_binget[binget_code] = actual_binget_target.to_bytes()
+
+            target, source = b''.join(target), b''.join(source)
+            return target, source
+
+        nodes_multiple_accessed = []
+        for id in self.threads_access:
+            if len(set(self.threads_access[id])) > 1:
+                nodes_multiple_accessed.append(id)
+        
+        for id in nodes_multiple_accessed:
+            source_num = self.threads_access[id][0] # thread which contains the defn
+            target_num = min(self.threads_access[id]) # thread which should contain the defn
+            # extract the binget code (after h) in target
+            # source = self.child_bytes[source_num]
+            # target = self.child_bytes[target_num]
+            
+            idx, obj = self.memo[id]
+            _, offset = self.r_memo[idx]
+
+            target_new, source_new = (swap_defn(target_num, source_num, offset, idx, type(obj).__name__))
+
+            self.child_bytes[source_num] = source_new
+            self.child_bytes[target_num] = target_new
+        
+        # # merging
+        print("o to new binget", self.old_to_new_binget)
+
+        # replace with actual binget in every bytecode, except source
+        for i, child in enumerate(self.child_bytes):
+            child_byte_list = [*map(bytes, zip(child))]
+            for idx, b in enumerate(child_byte_list):
+                if b == b'h' and child_byte_list[idx-1] not in int_types:
+                    if child_byte_list[idx+1] not in self.old_to_new_binget:
+                        continue
+                    child_byte_list[idx + 1] = self.old_to_new_binget[child_byte_list[idx+1]]
+            self.child_bytes[i] = b''.join(child_byte_list)
+
+
+        def merge():
+            # merges the child bytecodes
+            PROTOCOL_VER = b'\x80\x04'
+            parent_list = EMPTY_LIST + MEMOIZE + MARK
+            total_len = 0
+            for child in self.child_bytes:
+                total_len += len(child)
+                parent_list += child 
+            parent_list += APPENDS + STOP
+            frame_info = FRAME + pack("<Q", 5 + total_len)
+            return PROTOCOL_VER + frame_info + parent_list
+
+        return merge()
+        # self.save(obj)
+        # self.write(STOP)
+        # self.framer.end_framing()
+
     def memoize(self, obj):
         """Store an object in the memo."""
 
@@ -509,6 +700,8 @@ class _Pickler:
         idx = len(self.memo)
         self.write(self.put(idx))
         self.memo[id(obj)] = idx, obj
+        self.local_memo[self.thread_num] = self.local_memo.get(self.thread_num, 0) + 1
+        self.r_memo[idx] = self.thread_num, self.local_memo[self.thread_num]
 
     # Return a PUT (BINPUT, LONG_BINPUT) opcode string, with argument i.
     def put(self, idx):
@@ -540,6 +733,13 @@ class _Pickler:
         if pid is not None and save_persistent_id:
             self.save_pers(pid)
             return
+
+        # Update the threads_access
+        if isinstance(obj, Collection):
+            if id(obj) not in self.threads_access:
+                self.threads_access[id(obj)] = [self.thread_num]
+            else:
+                self.threads_access[id(obj)].append(self.thread_num)
 
         # Check the memo
         x = self.memo.get(id(obj))
@@ -1759,6 +1959,14 @@ def _dumps(obj, protocol=None, *, fix_imports=True, buffer_callback=None):
     assert isinstance(res, bytes_types)
     return res
 
+def _pardumps(obj, pickling_order, protocol=None, *, fix_imports=True, buffer_callback=None ):
+    f = io.BytesIO()
+    res = _Pickler(f, protocol, fix_imports=fix_imports,
+             buffer_callback=buffer_callback).pardumps(obj, pickling_order)
+    # res = f.getvalue()
+    assert isinstance(res, bytes_types)
+    return res
+
 def _load(file, *, fix_imports=True, encoding="ASCII", errors="strict",
           buffers=None):
     return _Unpickler(file, fix_imports=fix_imports, buffers=buffers,
@@ -1774,7 +1982,7 @@ def _loads(s, /, *, fix_imports=True, encoding="ASCII", errors="strict",
 
 # Use the faster _pickle if possible
 try:
-    from _pickle import (
+    from fickle import (
         PickleError,
         PicklingError,
         UnpicklingError,
@@ -1787,7 +1995,7 @@ try:
     )
 except ImportError:
     Pickler, Unpickler = _Pickler, _Unpickler
-    dump, dumps, load, loads = _dump, _dumps, _load, _loads
+    dump, dumps, load, loads, pardumps = _dump, _dumps, _load, _loads, _pardumps
 
 # Doctest
 def _test():
