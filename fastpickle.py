@@ -462,6 +462,7 @@ class _Pickler:
         self.threads_access = {} # maps id(obj) -> threads which accessed obj in the order accessed
         self.local_memo = {} # for each thread, stores the number of items memoized in that thread.
         self.r_memo = {}  # reverse memo, maps idx of memo -> thread_num, local_memo[thread_num]
+        self.defns = {} # maps id(obj) -> thread_num, start of defn for that obj, end of defn
         self.proto = int(protocol)
         self.bin = protocol >= 1
         self.fast = 0
@@ -518,162 +519,115 @@ class _Pickler:
         self.child_bytes = [0] * len(obj)
         for i, v in enumerate(pickling_order):
             self.thread_num = v
-            sp = self.framer.current_frame.tell()
+            p = self.framer.current_frame.tell()
+            self.current_thread_bytecode_sp = p
             self.save(obj[v])
-            self.child_bytes[v] = self.framer.current_frame.getvalue()[sp:]
-        
-        print("self.child_bytes",self.child_bytes)
-        print("self.threads_access", self.threads_access)
-        print("self.memo",self.memo)
-        print("self.local_memo", self.local_memo)
+            self.child_bytes[v] = self.framer.current_frame.getvalue()[p:]
 
-        collection_opcodes = {
-                'list': {
-                    'start': EMPTY_LIST,    
-                    'end': APPENDS 
-                },
-                'set': {
-                    'start': EMPTY_SET,
-                    'end': ADDITEMS
-                },
-                'dict': {
-                    'start': EMPTY_DICT,
-                    'end': SETITEMS
-                },
+        # collection_opcodes = {
+        #         'list': {
+        #             'start': EMPTY_LIST,    
+        #             'end': APPENDS 
+        #         },
+        #         'set': {
+        #             'start': EMPTY_SET,
+        #             'end': ADDITEMS
+        #         },
+        #         'dict': {
+        #             'start': EMPTY_DICT,
+        #             'end': SETITEMS
+        #         },
 
-            }
+        #     }
         
         int_types = [INT, BININT, BININT1, LONG, BININT2]
         
-        self.old_to_new_binget = {}
-
-        def swap_defn(target_id, source_id, offset, binget_code, collection_type):
-            """
-            Function to extract definition from source and substitute it in target bytecode and vice versa.
-
-            target: The target bytecode which should contain the definition.
-            source: The source bytecode from which to extract a definition.
-            offset: Offset at which to swap the definition.
-            binget_code: The idx for the object in the memo.
-            collection_type: A string specifying the type of collection (e.g., 'list', 'set').
-            return: Modified target and source bytecodes.
-            """
-            # print("offset", offset)
-
-            target = self.child_bytes[target_id]
-            source = self.child_bytes[source_id]
-            
-            end_opcodes_list = [APPENDS, ADDITEMS, SETITEMS]
-
-            if collection_type not in collection_opcodes:
-                raise ValueError(f"Unsupported collection type: {collection_type}")
-
-            start_opcode = collection_opcodes[collection_type]['start']
-            end_opcode = collection_opcodes[collection_type]['end']
-            
-            
-            binget_code = binget_code.to_bytes()
-            defn = b''
-            count_of_x94 = 0
-            source = [*map(bytes, zip(source))]
-            
-            # Extract the definition from source, replace it with binget
-            for i, b in enumerate(source):
-                if b == MEMOIZE and i-1>=0 and source[i-1] not in int_types:  # MEMOIZE
-                    count_of_x94 += 1
-                    if count_of_x94 == offset:
-                        j = i + 2
-                        count_of_mark = 1
-                        defn = source[i - 1] + MEMOIZE + MARK  # Starting Opcode + MEMOIZE + MARK
-                        while count_of_mark != 0 and j < len(source):
-
-                            # handling strings
-                            if source[j] == SHORT_BINUNICODE and source[j-1] not in int_types:
-                                defn += source[j]
-                                j+=1
-                                while(source[j]!=MEMOIZE): # could be a source of error if MEMOIZE is actually part of the string
-                                    defn += source[j]
-                                    j+=1
-                        
-                            if source[j] == MARK and source[j-1] not in int_types:
-                                count_of_mark += 1
-                            elif (source[j] == APPENDS or source[j] == ADDITEMS or source[j] == SETITEMS) and j-1>=0 and source[j-1] not in int_types:
-                                # print("hiii",source[j-1], source[j], j, source[j-10:j+10])
-                                count_of_mark -= 1
-                            defn += source[j]
-                            j += 1
-                        
-                        source = source[:i - 1] + [b'h', binget_code] + source[j:]
-                        break
-
-            # Replacing the binget reference with the extracted definition
-            target = [*map(bytes, zip(target))]
-            target_offset = 0
-            for i, b in enumerate(target):
-                if b == MEMOIZE:
-                    target_offset+=1
-                if b == b'h' and target[i + 1] == binget_code:
-                    target = target[:i] + [*map(bytes, zip(defn))] + target[i + 2:]
-                    break
-            
-            actual_binget_target = 1
-            for i in range(0, target_num):
-                if i not in self.local_memo:
-                    # this happens if the child is not of collection type
-                    continue
-                actual_binget_target += self.local_memo[i]
-            actual_binget_target += target_offset
-            self.old_to_new_binget[binget_code] = actual_binget_target.to_bytes()
-
-            target, source = b''.join(target), b''.join(source)
-            return target, source
-
-        nodes_multiple_accessed = []
+        bingets = {} # bingets keys that needs to replaced with the defn
+        offsets_replacement = {} # memoize that needs to be replace with binget
+        old_to_new_binget = {}
         for id in self.threads_access:
             if len(set(self.threads_access[id])) > 1:
-                nodes_multiple_accessed.append(id)
-        
-        for id in nodes_multiple_accessed:
-            source_num = self.threads_access[id][0] # thread which contains the defn
-            target_num = min(self.threads_access[id]) # thread which should contain the defn
-            # extract the binget code (after h) in target
-            # source = self.child_bytes[source_num]
-            # target = self.child_bytes[target_num]
-            
-            idx, obj = self.memo[id]
-            _, offset = self.r_memo[idx]
-
-            target_new, source_new = (swap_defn(target_num, source_num, offset, idx, type(obj).__name__))
-
-            self.child_bytes[source_num] = source_new
-            self.child_bytes[target_num] = target_new
-        
-        # # merging
-        print("o to new binget", self.old_to_new_binget)
-
-        # replace with actual binget in every bytecode, except source
-        for i, child in enumerate(self.child_bytes):
-            child_byte_list = [*map(bytes, zip(child))]
-            for idx, b in enumerate(child_byte_list):
-                if b == b'h' and child_byte_list[idx-1] not in int_types:
-                    if child_byte_list[idx+1] not in self.old_to_new_binget:
+                
+                source_num = self.threads_access[id][0] # thread which contains the defn
+                target_num = min(self.threads_access[id]) # thread which should contain the defn
+                if(source_num == target_num):
+                    continue
+                idx, obj = self.memo[id]
+                _, offset = self.r_memo[idx]
+                t_num, sp, ep = self.defns[id]
+                bingets[idx] = t_num, sp, ep
+                assert t_num == source_num
+                # how to identify which memoize needs replacing?
+                memoize_offset = 1 
+                for i in range(0, source_num):
+                    if i not in self.local_memo:
+                        # this happens if the child is not of collection type
                         continue
-                    child_byte_list[idx + 1] = self.old_to_new_binget[child_byte_list[idx+1]]
-            self.child_bytes[i] = b''.join(child_byte_list)
-
+                    memoize_offset += self.local_memo[i]
+                memoize_offset += offset # this is the memoize that you need to replace with binget and appropriate code
+                offsets_replacement[memoize_offset] = ep-sp, idx
+                old_to_new_binget[idx] = memoize_offset
+        
 
         def merge():
-            # merges the child bytecodes
+            # merges the child bytecodes in a linear fashion
             PROTOCOL_VER = b'\x80\x04'
-            parent_list = EMPTY_LIST + MEMOIZE + MARK
             total_len = 0
             for child in self.child_bytes:
                 total_len += len(child)
-                parent_list += child 
-            parent_list += APPENDS + STOP
+            parent_list = [0] * (total_len + 5)
+            parent_list[0] = EMPTY_LIST
+            parent_list[1] = MEMOIZE
+            parent_list[2] = MARK
+            i = 3
+            current_memoize = 1
+            actual_memoize = 1
+            for child in self.child_bytes:
+                j = 0
+                while j<len(child):
+                    
+                    b = child[j].to_bytes()
+                    if(b == MEMOIZE and j-1>=0 and child[j-1] not in int_types):
+                        current_memoize += 1
+                        if(current_memoize in offsets_replacement):
+                            # replace with binget
+                            defn_len, binget_code = offsets_replacement[current_memoize]
+                            parent_list[i-1] = BINGET
+                            parent_list[i] = binget_code.to_bytes()
+                            i+=1
+                            j += defn_len - 1
+                            continue
+                        actual_memoize += 1
+
+                    elif(b == BINGET and j-1>=0 and child[j-1] not in int_types):
+                        bingetcode = child[j+1]
+                        if child[j+1] in bingets:
+                            t_num, sp, ep = bingets[child[j+1]]
+                            for k in range(sp, ep):
+                                parent_list[i] = self.child_bytes[t_num][k].to_bytes()
+                                i+=1
+                            j+=2
+                            old_to_new_binget[bingetcode] = actual_memoize
+                            actual_memoize += 1
+                            # bingets needs to be replaced only once
+                            del bingets[bingetcode]
+                            continue
+                    
+                    parent_list[i] = b
+                    i+=1
+                    j+=1
+            
+            parent_list[-2] = APPENDS
+            parent_list[-1] = STOP
+            for i in range(len(parent_list)):
+                b = parent_list[i]
+                if b == BINGET:
+                    if int(parent_list[i+1][0]) in old_to_new_binget:
+                        parent_list[i+1] = old_to_new_binget[int(parent_list[i+1][0])].to_bytes()
+            parent_list = b''.join(parent_list)
             frame_info = FRAME + pack("<Q", 5 + total_len)
             return PROTOCOL_VER + frame_info + parent_list
-
+        
         return merge()
         # self.save(obj)
         # self.write(STOP)
@@ -757,7 +711,11 @@ class _Pickler:
             t = type(obj)
             f = self.dispatch.get(t)
             if f is not None:
+                sp = self.framer.current_frame.tell()
                 f(self, obj)  # Call unbound method with explicit self
+                ep = self.framer.current_frame.tell()
+                # maps id to thread num, sp, end
+                self.defns[id(obj)] = self.thread_num, sp - self.current_thread_bytecode_sp, ep - self.current_thread_bytecode_sp
                 return
 
             # Check private dispatch table if any, or else
