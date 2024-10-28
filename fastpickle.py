@@ -197,6 +197,7 @@ READONLY_BUFFER  = b'\x98'  # make top of stack readonly
 
 __all__.extend([x for x in dir() if re.match("[A-Z][A-Z0-9_]+$", x)])
 
+# SKIP = -1   # marks the bytes we need to skip while writing to result bytecode
 
 class _Framer:
 
@@ -460,8 +461,8 @@ class _Pickler:
         self._write_large_bytes = self.framer.write_large_bytes
         self.memo = {}
         self.threads_access = {} # maps id(obj) -> threads which accessed obj in the order accessed
-        self.local_memo = {} # for each thread, stores the number of items memoized in that thread.
-        self.r_memo = {}  # reverse memo, maps idx of memo -> thread_num, local_memo[thread_num]
+        # self.local_memo = {} # for each thread, stores the number of items memoized in that thread.
+        # self.r_memo = {}  # reverse memo, maps idx of memo -> thread_num, local_memo[thread_num]
         self.defns = {} # maps id(obj) -> thread_num, start of defn for that obj, end of defn
         self.proto = int(protocol)
         self.bin = protocol >= 1
@@ -523,51 +524,29 @@ class _Pickler:
             self.current_thread_bytecode_sp = p
             self.save(obj[v])
             self.child_bytes[v] = self.framer.current_frame.getvalue()[p:]
-
-        # collection_opcodes = {
-        #         'list': {
-        #             'start': EMPTY_LIST,    
-        #             'end': APPENDS 
-        #         },
-        #         'set': {
-        #             'start': EMPTY_SET,
-        #             'end': ADDITEMS
-        #         },
-        #         'dict': {
-        #             'start': EMPTY_DICT,
-        #             'end': SETITEMS
-        #         },
-
-        #     }
+            # convert into list of bytes for easy manipulation later
+            self.child_bytes[v] = [self.child_bytes[v][i:i+1] for i in range(len(self.child_bytes[v]))]
         
         int_types = [INT, BININT, BININT1, LONG, BININT2]
         
         bingets = {} # bingets keys that needs to replaced with the defn
-        offsets_replacement = {} # memoize that needs to be replace with binget
         old_to_new_binget = {}
+        defn_replacement = {} # maps the thread num, and the starting offset of the defn that needs to be replaced with binget
+
         for id in self.threads_access:
             if len(set(self.threads_access[id])) > 1:
-                
                 source_num = self.threads_access[id][0] # thread which contains the defn
                 target_num = min(self.threads_access[id]) # thread which should contain the defn
                 if(source_num == target_num):
                     continue
                 idx, obj = self.memo[id]
-                _, offset = self.r_memo[idx]
                 t_num, sp, ep = self.defns[id]
-                bingets[idx] = t_num, sp, ep
+                bingets[idx] = t_num, sp, ep # maps the binget code to the thread which contains the defn, and the sp and ep for that defn
+                defn_replacement[(t_num, sp)] = idx, ep # reverse mapping, to identify which memoize needs to be replaced by BINGET
                 assert t_num == source_num
-                # how to identify which memoize needs replacing?
-                memoize_offset = 1 
-                for i in range(0, source_num):
-                    if i not in self.local_memo:
-                        # this happens if the child is not of collection type
-                        continue
-                    memoize_offset += self.local_memo[i]
-                memoize_offset += offset # this is the memoize that you need to replace with binget and appropriate code
-                offsets_replacement[memoize_offset] = ep-sp, idx
-                old_to_new_binget[idx] = memoize_offset
         
+        print("old_to_new_binget", old_to_new_binget)
+        print('bingets',  bingets)
 
         def merge():
             # merges the child bytecodes in a linear fashion
@@ -580,35 +559,79 @@ class _Pickler:
             parent_list[1] = MEMOIZE
             parent_list[2] = MARK
             i = 3
-            current_memoize = 1
-            actual_memoize = 1
-            for child in self.child_bytes:
+            current_memoize = 0
+            
+            for t, child in enumerate(self.child_bytes):
                 j = 0
                 while j<len(child):
                     
-                    b = child[j].to_bytes()
-                    if(b == MEMOIZE and j-1>=0 and child[j-1] not in int_types):
+                    b = child[j]
+
+                    if (t, j) in defn_replacement:
+                        # needs to be replaced with binget
+                        s = j
+                        parent_list[i] = BINGET
+                        i+=1
+                        idx, e = defn_replacement[(t, j)]
+                        parent_list[i] = idx.to_bytes()
+                        i+=1
+                        j+=(e-s)
+                        continue
+
+                    elif(b == MEMOIZE and j-1>=0 and child[j-1] not in int_types):
                         current_memoize += 1
-                        if(current_memoize in offsets_replacement):
-                            # replace with binget
-                            defn_len, binget_code = offsets_replacement[current_memoize]
-                            parent_list[i-1] = BINGET
-                            parent_list[i] = binget_code.to_bytes()
+
+                    # handling strings
+                    elif b == SHORT_BINUNICODE and child[j-1] not in int_types:
+                        current_memoize += 1 
+                        parent_list[i] = child[j]
+                        i+=1
+                        j+=1
+                        len_of_s = int(child[j][0]) + 1 # + 1 for memoize
+                        parent_list[i] = child[j]
+                        i+=1
+                        j+=1
+                        while(len_of_s): 
+                            parent_list[i] = child[j]
+                            j+=1
                             i+=1
-                            j += defn_len - 1
-                            continue
-                        actual_memoize += 1
+                            len_of_s -= 1
+                        continue
 
                     elif(b == BINGET and j-1>=0 and child[j-1] not in int_types):
-                        bingetcode = child[j+1]
-                        if child[j+1] in bingets:
-                            t_num, sp, ep = bingets[child[j+1]]
-                            for k in range(sp, ep):
-                                parent_list[i] = self.child_bytes[t_num][k].to_bytes()
+                        bingetcode = int(child[j+1][0])
+                        if bingetcode in bingets:
+                            # need to replace with defn  
+                            current_memoize += 1  
+                            old_to_new_binget[bingetcode] = current_memoize
+                            t_num, sp, ep = bingets[bingetcode]
+                            k = sp
+                            while k!= ep:
+                                if self.child_bytes[t_num][k] == SHORT_BINUNICODE and self.child_bytes[t_num][k-1] not in int_types:
+                                    current_memoize += 1 
+                                    parent_list[i] = self.child_bytes[t_num][k] 
+                                    i+=1
+                                    k+=1
+                                    len_of_s = int(self.child_bytes[t_num][k][0]) + 1 # + 1 for memoize
+                                    parent_list[i] = self.child_bytes[t_num][k]
+                                    i+=1
+                                    k+=1
+                                    while(len_of_s): 
+                                        parent_list[i] = self.child_bytes[t_num][k]
+                                        i+=1
+                                        k+=1
+                                        len_of_s -= 1
+                                    continue
+
+                                if self.child_bytes[t_num][k] == MEMOIZE and self.child_bytes[t_num][k-1] not in int_types:
+                                    current_memoize+=1
+
+                                parent_list[i] = self.child_bytes[t_num][k]
                                 i+=1
+                                k+=1
+                            current_memoize -= 1 # for the extra memoize calculated in the defn
                             j+=2
-                            old_to_new_binget[bingetcode] = actual_memoize
-                            actual_memoize += 1
+                            
                             # bingets needs to be replaced only once
                             del bingets[bingetcode]
                             continue
@@ -616,15 +639,19 @@ class _Pickler:
                     parent_list[i] = b
                     i+=1
                     j+=1
-            
+    
             parent_list[-2] = APPENDS
             parent_list[-1] = STOP
+            
+            # replace old binget keys with actual binget keys
             for i in range(len(parent_list)):
                 b = parent_list[i]
                 if b == BINGET:
                     if int(parent_list[i+1][0]) in old_to_new_binget:
                         parent_list[i+1] = old_to_new_binget[int(parent_list[i+1][0])].to_bytes()
+                        
             parent_list = b''.join(parent_list)
+            
             frame_info = FRAME + pack("<Q", 5 + total_len)
             return PROTOCOL_VER + frame_info + parent_list
         
@@ -654,8 +681,8 @@ class _Pickler:
         idx = len(self.memo)
         self.write(self.put(idx))
         self.memo[id(obj)] = idx, obj
-        self.local_memo[self.thread_num] = self.local_memo.get(self.thread_num, 0) + 1
-        self.r_memo[idx] = self.thread_num, self.local_memo[self.thread_num]
+        # self.local_memo[self.thread_num] = self.local_memo.get(self.thread_num, 0) + 1
+        # self.r_memo[idx] = self.thread_num, self.local_memo[self.thread_num]
 
     # Return a PUT (BINPUT, LONG_BINPUT) opcode string, with argument i.
     def put(self, idx):
