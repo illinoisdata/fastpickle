@@ -1,13 +1,48 @@
-# faster_pickle 
+# Fast Pickle
 
-## Setup
+## Installation
 
-``` 
-python3.11 setup.py build_ext --inplace
+Install latest release on PyPI.
+
+```bash
+pip install fastpickle
 ```
 
-OR
+## Development
 
+(Optional) Create an virtual environment and step into.
+
+``` bash
+make virtualenv
+source .venv/bin/activate
 ```
-pip3.11 install -e .
+
+Install `fastpickle` in editable development model.
+
+```bash
+make install
+```
+
+Run automatic formatter.
+
+```bash
+make format
+```
+
+Run linter (type checking, variable declaration, etc.).
+
+```bash
+make lint
+```
+
+Run unit tests. Afterwards, you can check the test coverage in `htmlcov/index.html` (browser) or `coverage.xml`.
+
+```bash
+make test
+```
+
+Clean up temporary files.
+
+```bash
+make clean
 ```
