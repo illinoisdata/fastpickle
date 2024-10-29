@@ -1,0 +1,37 @@
+[tool.setuptools.package-data]
+tuner = ["py.typed"]
+
+[tool.setuptools]
+packages = ["fastpickle"]
+
+[project]
+name = "fastpickle"
+authors = [
+    {name = "Talika Gupta", email = "talikag2@illinois.edu"},
+    {name = "Supawit Chockchowwat", email = "supawit2@illinois.edu"},
+    {name = "Yongjoo Park", email = "yongjoo@illinois.edu"},
+]
+description = "Fast pickle"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = [
+    "pickle",
+    "parallel",
+]
+license = {file = "LICENSE"}
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.11",
+]
+version = "0.0.0"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "flake8",
+    "isort",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+]
