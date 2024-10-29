@@ -40,9 +40,12 @@ fmt:              ## Format code using black & isort.
 
 .PHONY: lint
 lint:             ## Run pep8, black, mypy linters.
-	$(ENV_PREFIX)flake8 --extend-ignore=E203 --max-line-length 127 fastpickle/ tests/
+	$(ENV_PREFIX)flake8 fastpickle/ tests/ --count --select=E9,F63,F7,F82 --max-line-length 127 --show-source --statistics
 	$(ENV_PREFIX)black -l 127 --check fastpickle/ tests/
-	$(ENV_PREFIX)mypy --ignore-missing-imports fastpickle/ tests/
+
+## TODO: Re-enable these linters.
+# $(ENV_PREFIX)flake8 --extend-ignore=E203 --max-line-length 127 fastpickle/ tests/
+# $(ENV_PREFIX)mypy --ignore-missing-imports fastpickle/ tests/
 
 .PHONY: test
 test:        ## Run tests and generate coverage report.

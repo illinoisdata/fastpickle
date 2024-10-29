@@ -13,7 +13,7 @@ authors = [
 ]
 description = "Fast pickle"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 keywords = [
     "pickle",
     "parallel",
