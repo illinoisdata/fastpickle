@@ -1,0 +1,334 @@
+// threadpool.c
+#include "threadpool.h"
+#include <stdlib.h>
+#include <string.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+// a single unit of work, contains all information a thread would need
+// like which func to use, what's the arg, buffer to store information, index
+// for location information (important)
+typedef struct Task {
+    task_func function;  //function ptr for our task (void *)
+    void *arg;           //argument for task fun
+    struct Task *next;   //next task in queu
+    size_t index;        //index of our task, needed for result placement
+    char *output;        //output buffer for our task
+    size_t output_size;  //size of this data
+} Task;
+
+// basically a structure to represent a collection of worker threads
+// & a task queue for these workers to work on  
+struct ThreadPool {
+    pthread_t *threads;     //array of thread ids
+    int thread_count;       //#threads in our pool
+    Task *head;             //head of task queue
+    Task *tail;             //tail of the task queue
+    pthread_mutex_t lock;   //mutex specifically for access to the task queue
+    pthread_cond_t notify;  //condition variable to wake threads up when there's a new tsk
+    pthread_cond_t completed; //cond var to let threads know when all tasks have been fin
+    int stop;               //flag for when pool is closing
+    int started;            //number of 'active' threads
+    char **results;         // 2-d array to store result for each task
+    size_t *result_sizes;   // array to store sizes for each result/
+    size_t total_elements;  //expected number of tasks
+    size_t completed_tasks; //# of completed tasks
+    int *task_statuses; // 
+
+};
+
+ThreadPool* thread_pool_init(int thread_count, size_t initial_elements) {
+    ThreadPool *pool;
+    int i;
+
+    // validate input parameters
+    if (thread_count <= 0 || initial_elements == 0) {
+        fprintf(stderr, "Invalid thread count or initial elements.\n");
+        return NULL;
+    }
+
+    //allocate memory for the pool
+    if ((pool = (ThreadPool *)malloc(sizeof(ThreadPool))) == NULL) {
+        goto err;
+    }
+
+    // Initialize the pool
+    pool->thread_count = 0;
+    pool->started = 0;
+    pool->stop = 0;
+    pool->head = pool->tail = NULL;
+    pool->completed_tasks = 0;
+    pool->total_elements = initial_elements;
+
+    if ((pool->threads = (pthread_t *)malloc(sizeof(pthread_t) * thread_count)) == NULL) {
+        goto err;
+    }
+
+    if ((pool->results = (char **)calloc(initial_elements, sizeof(char *))) == NULL) {
+        goto err;
+    }
+
+    if ((pool->result_sizes = (size_t *)calloc(initial_elements, sizeof(size_t))) == NULL) {
+        goto err;
+    }
+
+    if ((pool->task_statuses = (int *)calloc(initial_elements, sizeof(int))) == NULL) {
+        goto err;
+    }
+
+    if (pthread_mutex_init(&(pool->lock), NULL) != 0) {
+        goto err;
+    }
+
+    if (pthread_cond_init(&(pool->notify), NULL) != 0) {
+        pthread_mutex_destroy(&(pool->lock));
+        goto err;
+    }
+
+    if (pthread_cond_init(&(pool->completed), NULL) != 0) {
+        pthread_mutex_destroy(&(pool->lock));
+        pthread_cond_destroy(&(pool->notify));
+        goto err;
+    }
+
+    // Start worker threads
+    for (i = 0; i < thread_count; i++) {
+        if (pthread_create(&(pool->threads[i]), NULL, thread_do_work, (void*)pool) != 0) {
+            thread_pool_destroy(pool);
+            return NULL;
+        }
+        pool->thread_count++;
+        pool->started++;
+    }
+
+    return pool;
+
+err:
+    if (pool) {
+        pthread_mutex_destroy(&(pool->lock));
+        pthread_cond_destroy(&(pool->notify));
+        pthread_cond_destroy(&(pool->completed));
+        free(pool->threads);
+        free(pool->results);
+        free(pool->result_sizes);
+        free(pool);
+    }
+    return NULL;
+}
+
+// add a new task to the queue for threads to pick up
+int thread_pool_add_pickle_task(ThreadPool *pool, task_func function, void *object, size_t index) {
+    Task *task;
+
+    if (pool == NULL || function == NULL || index >= pool->total_elements) {
+        return -1;
+    }
+
+    if ((task = (Task *)malloc(sizeof(Task))) == NULL) {
+        return -1;
+    }
+
+    task->function = function;
+    task->arg = object;
+    task->index = index;
+    task->output = NULL;
+    task->output_size = 0;
+    task->next = NULL;
+
+    pthread_mutex_lock(&(pool->lock));
+
+    if (pool->stop) {
+        pthread_mutex_unlock(&(pool->lock));
+        free(task);
+        return -1;
+    }
+
+    if (pool->tail == NULL) {
+        pool->head = pool->tail = task;
+    } else {
+        pool->tail->next = task;
+        pool->tail = task;
+    }
+
+    // signal to thread to let it know that a new task is available
+    pthread_cond_signal(&(pool->notify));
+    pthread_mutex_unlock(&(pool->lock));
+
+    return 0;
+}
+
+int thread_pool_destroy(ThreadPool *pool) {
+    size_t i;
+    Task *task;
+
+    if (pool == NULL) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&(pool->lock));
+    pool->stop = 1;
+    pthread_cond_broadcast(&(pool->notify));
+    pthread_mutex_unlock(&(pool->lock));
+
+    for (i = 0; i < pool->thread_count; i++) {
+        pthread_join(pool->threads[i], NULL);
+    }
+
+    // Free remaining tasks
+    while (pool->head != NULL) {
+        task = pool->head;
+        pool->head = task->next;
+        free(task);
+    }
+
+    pthread_mutex_destroy(&(pool->lock));
+    pthread_cond_destroy(&(pool->notify));
+    pthread_cond_destroy(&(pool->completed));
+
+    free(pool->threads);
+    for (i = 0; i < pool->total_elements; i++) {
+        free(pool->results[i]);
+    }
+    free(pool->results);
+    free(pool->result_sizes);
+    free(pool);
+
+    return 0;
+}
+
+
+static void *thread_do_work(void *pool) {
+    ThreadPool *thread_pool = (ThreadPool *)pool;
+    Task *task;
+    unsigned int seed = (unsigned int)time(NULL);
+    seed = seed * 31 + (unsigned int)((uintptr_t)pthread_self() & 0xFFFFFFFF);
+
+    while (1) {
+        pthread_mutex_lock(&(thread_pool->lock));
+
+        while ((thread_pool->head == NULL) && (!thread_pool->stop)) {
+            pthread_cond_wait(&(thread_pool->notify), &(thread_pool->lock));
+        }
+
+        if (thread_pool->stop && thread_pool->head == NULL) {
+            pthread_mutex_unlock(&(thread_pool->lock));
+            break;
+        }
+
+        task = thread_pool->head;
+        if (task != NULL) {
+            thread_pool->head = task->next;
+            if (thread_pool->head == NULL) {
+                thread_pool->tail = NULL;
+            }
+        }
+
+        pthread_mutex_unlock(&(thread_pool->lock));
+
+        if (task != NULL) {
+            // Random sleep between 0.1 and 1 second
+            int sleep_time_us = (rand_r(&seed) % 901000) + 100000; // 100,000 to 1,000,000 microseconds
+            usleep(sleep_time_us);
+
+            int result = (*(task->function))(task->arg, &task->output, &task->output_size);
+
+            pthread_mutex_lock(&(thread_pool->lock));
+            if (result == 0) {
+                thread_pool->results[task->index] = task->output;
+                thread_pool->result_sizes[task->index] = task->output_size;
+            }
+            thread_pool->completed_tasks++;
+            if (thread_pool->completed_tasks == thread_pool->total_elements) {
+                pthread_cond_signal(&(thread_pool->completed));
+            }
+            pthread_mutex_unlock(&(thread_pool->lock));
+
+            free(task);
+        }
+    }
+
+    pthread_mutex_lock(&(thread_pool->lock));
+    thread_pool->started--;
+    pthread_mutex_unlock(&(thread_pool->lock));
+
+    pthread_exit(NULL);
+    return NULL;
+}
+
+
+char *thread_pool_get_serialized_result(ThreadPool *pool, size_t *total_size) {
+    char *final_result = NULL;
+    *total_size = 0;
+
+
+    for (size_t i = 0; i < pool->total_elements; i++) {
+        *total_size += pool->result_sizes[i];
+    }
+
+    final_result = (char *)malloc(*total_size);
+    if (final_result == NULL) {
+        return NULL;
+    }
+
+    char *current_pos = final_result;
+    for (size_t i = 0; i < pool->total_elements; i++) {
+        if (pool->results[i] != NULL) {
+            memcpy(current_pos, pool->results[i], pool->result_sizes[i]);
+            current_pos += pool->result_sizes[i];
+        } else {
+            
+            fprintf(stderr, "Warning: Result for task %zu is NULL.\n", i);
+        }
+    }
+
+    return final_result;
+}
+
+
+// block calling thread until we're done with all the tasks in the queue
+int thread_pool_wait_completion(ThreadPool *pool) {
+    pthread_mutex_lock(&(pool->lock));
+    while (pool->completed_tasks < pool->total_elements) {
+        pthread_cond_wait(&(pool->completed), &(pool->lock));
+    }
+    pthread_mutex_unlock(&(pool->lock));
+    return 0;
+}
+
+ int thread_pool_get_task_status(ThreadPool *pool, size_t index) {
+    if (index >= pool->total_elements) {
+        return -1; // Invalid index
+    }
+    return pool->task_statuses[index];
+}
+
+char* thread_pool_get_individual_result(ThreadPool *pool, size_t index) {
+    if (pool == NULL || index >= pool->total_elements) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&(pool->lock));
+    char *result = NULL;
+    if (pool->results != NULL && pool->results[index] != NULL) {
+        result = strdup(pool->results[index]); // Duplicate the string to avoid external modification
+    }
+    pthread_mutex_unlock(&(pool->lock));
+
+    return result;
+}
+
+
+size_t thread_pool_get_result_size(ThreadPool *pool, size_t index) {
+    if (pool == NULL || index >= pool->total_elements) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&(pool->lock));
+    size_t size = 0;
+    if (pool->result_sizes != NULL) {
+        size = pool->result_sizes[index];
+    }
+    pthread_mutex_unlock(&(pool->lock));
+
+    return size;
+}

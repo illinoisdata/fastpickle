@@ -1,15 +1,17 @@
+// unchanged _pickle.c codefile to compare functions
+// in case I've messed up the threaded version
+
 /* pickle accelerator C extensor: _pickle module.
+to test the c file changes
+pip install --no-cache -e . && python -c "import _pickle; _pickle.dumps(123)"
+
+// list of opcodes w explanations, taken from pickle repo
+https://gist.github.com/AdityaKunte18/93a4a49d5501b36dce914d28b51243d4
  *
  * It is built as a built-in module (Py_BUILD_CORE_BUILTIN define) on Windows
  * and as an extension module (Py_BUILD_CORE_MODULE define) on other
- * 
- * 
  * platforms. */
-
-
-// github link for opcodes
-// https://gist.github.com/AdityaKunte18/93a4a49d5501b36dce914d28b51243d4
-
+// /pip install --no-cache -e .
 #ifndef Py_BUILD_CORE_BUILTIN
 #  define Py_BUILD_CORE_MODULE 1
 #endif
@@ -20,8 +22,8 @@
 #include "pycore_runtime.h"       // _Py_ID()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "structmember.h"         // PyMemberDef
-#include "threadpool.h"
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>               // strtol()
 
 PyDoc_STRVAR(pickle_module_doc,
@@ -51,11 +53,68 @@ enum {
 #define LONG LONG_
 #endif
 
-#define NUM_THREADS 4
+// for serialization tasks
+typedef struct {
+    PyObject *obj;
+} SerializationTask;
 
+// thread-safe queue
+typedef struct {
+    SerializationTask *tasks;
+    int front;
+    int rear;
+    int capacity;
+    pthread_mutex_t lock;
+    pthread_cond_t notify;
+} TaskQueue;
 
+TaskQueue* init_task_queue(int capacity) {
+    TaskQueue *queue = malloc(sizeof(TaskQueue));
+    queue->tasks = malloc(sizeof(SerializationTask) * capacity);
+    queue->front = queue->rear = 0;
+    queue->capacity = capacity;
+    pthread_mutex_init(&queue->lock, NULL);
+    pthread_cond_init(&queue->notify, NULL);
+    return queue;
+}
 
+void enqueue_task(TaskQueue *queue, PyObject *obj) {
+    pthread_mutex_lock(&queue->lock);
+    // Handle queue overflow, resizing, etc.
+    queue->tasks[queue->rear++].obj = obj;
+    pthread_cond_signal(&queue->notify);
+    pthread_mutex_unlock(&queue->lock);
+}
 
+SerializationTask dequeue_task(TaskQueue *queue) {
+    pthread_mutex_lock(&queue->lock);
+    while (queue->front == queue->rear) {
+        pthread_cond_wait(&queue->notify, &queue->lock);
+    }
+    SerializationTask task = queue->tasks[queue->front++];
+    pthread_mutex_unlock(&queue->lock);
+    return task;
+}
+
+void* worker_function(void *arg) {
+    TaskQueue *queue = (TaskQueue *)arg;
+    while (1) {
+        SerializationTask task = dequeue_task(queue);
+        // Serialize the object
+        // Handle memoization
+        // Enqueue nested objects if necessary
+        // Store serialized byte array
+    }
+    return NULL;
+}
+
+pthread_t* init_thread_pool(int num_threads, TaskQueue *queue) {
+    pthread_t *threads = malloc(sizeof(pthread_t) * num_threads);
+    for (int i = 0; i < num_threads; i++) {
+        pthread_create(&threads[i], NULL, worker_function, (void*)queue);
+    }
+    return threads;
+}
 
 
 /* Pickle opcodes. These must be kept updated with pickle.py.
@@ -160,7 +219,6 @@ enum {
     FRAME_SIZE_TARGET = 64 * 1024,
     FRAME_HEADER_SIZE = 9
 };
-
 
 /*************************************************************************/
 
@@ -639,7 +697,6 @@ typedef struct {
     size_t mt_used;
     size_t mt_allocated;
     PyMemoEntry *mt_table;
-    pthread_mutex_t mt_lock;  
 } PyMemoTable;
 
 typedef struct PicklerObject {
@@ -747,7 +804,6 @@ static PyTypeObject Unpickler_Type;
  a bunch of unnecessary object creation. This makes a huge performance
  difference. */
 
-
 #define MT_MINSIZE 8
 #define PERTURB_SHIFT 5
 
@@ -772,13 +828,6 @@ PyMemoTable_New(void)
     }
     memset(memo->mt_table, 0, MT_MINSIZE * sizeof(PyMemoEntry));
 
-    if (pthread_mutex_init(&memo->mt_lock, NULL) != 0) {
-        PyMem_Free(memo->mt_table);
-        PyMem_Free(memo);
-        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize mutex");
-        return NULL;
-    }
-    // printf("initialized memo table correctly\n");
     return memo;
 }
 
@@ -789,7 +838,6 @@ PyMemoTable_Copy(PyMemoTable *self)
     if (new == NULL)
         return NULL;
 
-    pthread_mutex_lock(&self->mt_lock);
     new->mt_used = self->mt_used;
     new->mt_allocated = self->mt_allocated;
     new->mt_mask = self->mt_mask;
@@ -798,7 +846,6 @@ PyMemoTable_Copy(PyMemoTable *self)
     PyMem_Free(new->mt_table);
     new->mt_table = PyMem_NEW(PyMemoEntry, self->mt_allocated);
     if (new->mt_table == NULL) {
-        pthread_mutex_unlock(&self->mt_lock);
         PyMem_Free(new);
         PyErr_NoMemory();
         return NULL;
@@ -808,23 +855,19 @@ PyMemoTable_Copy(PyMemoTable *self)
     }
     memcpy(new->mt_table, self->mt_table,
            sizeof(PyMemoEntry) * self->mt_allocated);
-    pthread_mutex_unlock(&self->mt_lock);
+
     return new;
 }
 
 static Py_ssize_t
 PyMemoTable_Size(PyMemoTable *self)
 {
-    pthread_mutex_lock(&self->mt_lock);
-    Py_ssize_t size = self->mt_used;
-    pthread_mutex_unlock(&self->mt_lock);
-    return size;
+    return self->mt_used;
 }
 
 static int
 PyMemoTable_Clear(PyMemoTable *self)
 {
-    pthread_mutex_lock(&self->mt_lock);
     Py_ssize_t i = self->mt_allocated;
 
     while (--i >= 0) {
@@ -832,7 +875,6 @@ PyMemoTable_Clear(PyMemoTable *self)
     }
     self->mt_used = 0;
     memset(self->mt_table, 0, self->mt_allocated * sizeof(PyMemoEntry));
-    pthread_mutex_unlock(&self->mt_lock);
     return 0;
 }
 
@@ -842,7 +884,7 @@ PyMemoTable_Del(PyMemoTable *self)
     if (self == NULL)
         return;
     PyMemoTable_Clear(self);
-    pthread_mutex_destroy(&self->mt_lock);
+
     PyMem_Free(self->mt_table);
     PyMem_Free(self);
 }
@@ -931,22 +973,16 @@ _PyMemoTable_ResizeTable(PyMemoTable *self, size_t min_size)
 static Py_ssize_t *
 PyMemoTable_Get(PyMemoTable *self, PyObject *key)
 {
-    pthread_mutex_lock(&self->mt_lock);
     PyMemoEntry *entry = _PyMemoTable_Lookup(self, key);
-    Py_ssize_t *result = NULL;
-    if (entry->me_key != NULL) {
-        result = &entry->me_value;
-    }
-    pthread_mutex_unlock(&self->mt_lock);
-    return result;
+    if (entry->me_key == NULL)
+        return NULL;
+    return &entry->me_value;
 }
 
 /* Returns -1 on failure, 0 on success. */
 static int
 PyMemoTable_Set(PyMemoTable *self, PyObject *key, Py_ssize_t value)
 {
-    int res = 0;
-    pthread_mutex_lock(&self->mt_lock);
     PyMemoEntry *entry;
 
     assert(key != NULL);
@@ -954,33 +990,29 @@ PyMemoTable_Set(PyMemoTable *self, PyObject *key, Py_ssize_t value)
     entry = _PyMemoTable_Lookup(self, key);
     if (entry->me_key != NULL) {
         entry->me_value = value;
-        res = 0;
-    } else {
-        Py_INCREF(key);
-        entry->me_key = key;
-        entry->me_value = value;
-        self->mt_used++;
-         /* If we added a key, we can safely resize. Otherwise just return!
-        * If used >= 2/3 size, adjust size. Normally, this quaduples the size.
-        *
-        * Quadrupling the size improves average table sparseness
-        * (reducing collisions) at the cost of some memory. It also halves
-        * the number of expensive resize operations in a growing memo table.
-        *
-        * Very large memo tables (over 50K items) use doubling instead.
-        * This may help applications with severe memory constraints.
-        */
-       if (SIZE_MAX / 3 >= self->mt_used && self->mt_used * 3 < self->mt_allocated * 2) {
-        res = 0;
-       } else {
-            // self->mt_used is always < PY_SSIZE_T_MAX, so this can't overflow.
-            size_t desired_size = (self->mt_used > 50000 ? 2 : 4) * self->mt_used;
-            res = _PyMemoTable_ResizeTable(self, desired_size);
-       }
+        return 0;
     }
-    pthread_mutex_unlock(&self->mt_lock);
-    return res;
-    
+    Py_INCREF(key);
+    entry->me_key = key;
+    entry->me_value = value;
+    self->mt_used++;
+
+    /* If we added a key, we can safely resize. Otherwise just return!
+     * If used >= 2/3 size, adjust size. Normally, this quaduples the size.
+     *
+     * Quadrupling the size improves average table sparseness
+     * (reducing collisions) at the cost of some memory. It also halves
+     * the number of expensive resize operations in a growing memo table.
+     *
+     * Very large memo tables (over 50K items) use doubling instead.
+     * This may help applications with severe memory constraints.
+     */
+    if (SIZE_MAX / 3 >= self->mt_used && self->mt_used * 3 < self->mt_allocated * 2) {
+        return 0;
+    }
+    // self->mt_used is always < PY_SSIZE_T_MAX, so this can't overflow.
+    size_t desired_size = (self->mt_used > 50000 ? 2 : 4) * self->mt_used;
+    return _PyMemoTable_ResizeTable(self, desired_size);
 }
 
 #undef MT_MINSIZE
@@ -3108,13 +3140,9 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
     return 0;
 }
 
-// new change (modified save_list for threading)
 static int
 save_list(PicklerObject *self, PyObject *obj)
 {
-
-
-
     char header[3];
     Py_ssize_t len;
     int status = 0;
@@ -3139,10 +3167,9 @@ save_list(PicklerObject *self, PyObject *obj)
     /* Get list length, and bow out early if empty. */
     if ((len = PyList_Size(obj)) < 0)
         goto error;
-    
+
     if (memo_put(self, obj) < 0)
         goto error;
-    // printf("memo put finished");
 
     if (len != 0) {
         /* Materialize the list elements. */
@@ -3175,7 +3202,6 @@ save_list(PicklerObject *self, PyObject *obj)
 
     return status;
 }
-
 
 /* iter is an iterator giving (key, value) pairs, and we batch up chunks of
  *     MARK key value ... key value SETITEMS
@@ -4026,6 +4052,7 @@ get_class(PyObject *obj)
 /* We're saving obj, and args is the 2-thru-5 tuple returned by the
  * appropriate __reduce__ method for obj.
  */
+// bookmark
 static int
 save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
 {
@@ -4339,7 +4366,7 @@ save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
     }
     return 0;
 }
-
+// bookmark save
 static int
 save(PicklerObject *self, PyObject *obj, int pers_save)
 {
@@ -4418,7 +4445,6 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
         goto done;
     }
     else if (type == &PyList_Type) {
-        // printf("calling save list\n");
         status = save_list(self, obj);
         goto done;
     }

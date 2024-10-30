@@ -4,9 +4,9 @@
 from setuptools import setup, Extension
 
 pickle_module = Extension('_pickle',
-                          sources=['_pickle.c'],
-                          include_dirs=['Include/internal', 'Include'],
-                          extra_compile_args=['-fno-strict-overflow', '-Wsign-compare', '-Wunreachable-code', '-DNDEBUG', '-g', '-O3', '-Wall'],
+                          sources=['_pickle.c', 'threadpool.c'],
+                          include_dirs=['Include/internal', 'Include/custom', 'Include'],
+                          extra_compile_args=['-fno-strict-overflow', '-Wsign-compare', '-Wunreachable-code', '-DNDEBUG', '-g', '-O3', '-Wall', '-lpthread'],
                           )
 
 setup(

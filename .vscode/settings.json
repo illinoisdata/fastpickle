@@ -1,0 +1,17 @@
+{
+    "files.associations": {
+        "threadpool.h": "c",
+        "_pickle.c.h": "c",
+        "__locale": "c",
+        "pycore_pystate.h": "c",
+        "pycore_ceval.h": "c",
+        "__hash_table": "c",
+        "array": "c",
+        "type_traits": "c",
+        "limits": "c",
+        "ratio": "c",
+        "tuple": "c",
+        "variant": "c",
+        "charconv": "c"
+    }
+}
