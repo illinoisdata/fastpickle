@@ -26,7 +26,7 @@ make install
 Run automatic formatter.
 
 ```bash
-make format
+make fmt
 ```
 
 Run linter (type checking, variable declaration, etc.).
