@@ -19,12 +19,12 @@ def test_with_simple_shared_list():
     assert our_bytecode == pickle.dumps(l)
 
 
-def test_with_simple_shared_list():
-    shared_li = [1, 2, 6]
-    l = [1, [2, [2, 3], shared_li], [3, shared_li]]
-    pickling_order = [0, 1, 2]
-    our_bytecode = fastpickle.pardumps(l, pickling_order)
-    assert our_bytecode == pickle.dumps(l)
+# def test_with_simple_shared_list():
+#     shared_li = [1, 2, 6]
+#     l = [1, [2, [2, 3], shared_li], [3, shared_li]]
+#     pickling_order = [0, 1, 2]
+#     our_bytecode = fastpickle.pardumps(l, pickling_order)
+#     assert our_bytecode == pickle.dumps(l)
 
 
 def test_four_children():
@@ -99,15 +99,29 @@ def test_2():
     assert our_bytecode == pickle.dumps(l)
 
 
-# def test_shared_tuple_with_collections():
-#     # In tuples, memoize appears after all the elements
-#     # this fails
-#     # "hi" is memoized before tuple1 is memoized
-#     tuple1 = (1, "hi")
-#     l = [[tuple1, 2],[1,tuple1]]
-#     pickling_order = [1, 0]
-#     our_bytecode = fastpickle.pardumps(l, pickling_order)
-#     print(our_bytecode)
-#     print(pickle.dumps(l))
-#     print(pickletools.dis(pickle.dumps(l)))
-#     assert our_bytecode == pickle.dumps(l)
+def test_shared_tuple_with_collections():
+    tuple1 = (1, "string")
+    l = [[tuple1, 2],[1,tuple1]]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_recursive():
+    sl = [5, 6]
+    sl2 = [4, sl]
+    l = [[0, sl2], [1, sl2], [2, [], sl]]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+def test_recursive_tuple():
+    sl = (5, "hi",  6)
+    sl2 = (1, sl)
+    l = [[0, sl2], [1, sl2], [2, [], sl]]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+
