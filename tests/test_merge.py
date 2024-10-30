@@ -6,7 +6,7 @@ import fastpickle
 
 def test_with_no_shared_ref():
     l = [1, [4, 6, 7], set([0, 9])]
-    pickling_order = [2, 1, 0]
+    pickling_order = [0, 1, 2]
     our_bytecode = fastpickle.pardumps(l, pickling_order)
     assert our_bytecode == pickle.dumps(l)
 
@@ -99,15 +99,59 @@ def test_2():
     assert our_bytecode == pickle.dumps(l)
 
 
-# def test_shared_tuple_with_collections():
-#     # In tuples, memoize appears after all the elements
-#     # this fails
-#     # "hi" is memoized before tuple1 is memoized
-#     tuple1 = (1, "hi")
-#     l = [[tuple1, 2],[1,tuple1]]
+def test_shared_tuple_with_collections():
+    tuple1 = (1, "string")
+    l = [[tuple1, 2], [1, tuple1]]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_recursive():
+    sl = [5, 6]
+    sl2 = [4, sl]
+    l = [[0, sl2], [1, sl2], [2, [], sl]]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_recursive_tuple():
+    sl = (5, "hi", 6)
+    sl2 = (1, sl)
+    l = [[0, sl2], [1, sl2], [2, [], sl]]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+class SampleClass:
+    def __init__(self, name, values):
+        self.name = name
+        self.values = values
+
+
+def test_class():
+    obj = SampleClass(name="TestObject", values=[1, 2, 3, [4, 5, 6]])
+    l = [obj, [4, 6, 7], set([0, 9])]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+# def test_two_obj():
+#     obj = SampleClass(name="TestObject", values=[1, 2, 3, [4, 5, 6]])
+#     obj1 = SampleClass(name="TestObject1", values=[1, 2, 3])
+#     l = [obj, [obj, obj1]]
+#     # l = [obj, [4, 6, 7], set([0, 9])]
 #     pickling_order = [1, 0]
 #     our_bytecode = fastpickle.pardumps(l, pickling_order)
-#     print(our_bytecode)
-#     print(pickle.dumps(l))
-#     print(pickletools.dis(pickle.dumps(l)))
 #     assert our_bytecode == pickle.dumps(l)
+
+
+def test_shared_class():
+    obj = SampleClass(name="TestObject", values=[1, 2, 3, [4, 5, 6]])
+    l = [obj, [4, 6, 7, obj], set([0, 9])]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
