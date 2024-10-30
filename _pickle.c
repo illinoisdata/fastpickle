@@ -755,6 +755,7 @@ static PyTypeObject Unpickler_Type;
 static PyMemoTable *
 PyMemoTable_New(void)
 {
+    //can replace with own memo table
     PyMemoTable *memo = PyMem_Malloc(sizeof(PyMemoTable));
     if (memo == NULL) {
         PyErr_NoMemory();
