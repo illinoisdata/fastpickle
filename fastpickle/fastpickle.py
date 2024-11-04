@@ -501,7 +501,7 @@ class _Pickler:
 
     def pardumps(self, obj, pickling_order):
         """Customized dumps() for parallelization.
-        obj : list of [list | set | dict]
+        obj
         pickling_order : list containing the order in which the children of obj will be pickled
 
         Returns :
@@ -536,7 +536,10 @@ class _Pickler:
         bingets = {}  # bingets keys that needs to replaced with the defn
         old_to_new_binget = {}
         defn_replacement = {}  # maps the thread num, and the starting offset of the defn that needs to be replaced with binget
-
+        # print("old_to_new_binget", old_to_new_binget)
+        print("bingets", bingets)
+        for child in self.child_bytes:
+            print("hi", b"".join(child))
         for id in self.threads_access:
             if len(set(self.threads_access[id])) > 1:
                 source_num = self.threads_access[id][0]  # thread which contains the defn
@@ -550,126 +553,94 @@ class _Pickler:
                     sp,
                     ep,
                 )  # maps the binget code to the thread which contains the defn, and the sp and ep for that defn
-                defn_replacement[(t_num, sp)] = (
-                    idx,
-                    ep,
-                )  # reverse mapping, to identify which memoize needs to be replaced by BINGET
+                # defn_replacement[(t_num, sp)] = (
+                #     idx,
+                #     ep,
+                # )  # reverse mapping, to identify which memoize needs to be replaced by BINGET
                 assert t_num == source_num
 
-        print("old_to_new_binget", old_to_new_binget)
-        print("bingets", bingets)
+        # merges the child bytecodes in a linear fashion
+        PROTOCOL_VER = b"\x80\x04"
+        total_len = 0
+        for child in self.child_bytes:
+            total_len += len(child)
+        parent_list = [0] * (total_len + 5)
+        parent_list[0] = EMPTY_LIST
+        parent_list[1] = MEMOIZE
+        parent_list[2] = MARK
+        self.i = 3
+        self.current_memoize = 0
 
-        def merge():
-            # merges the child bytecodes in a linear fashion
-            PROTOCOL_VER = b"\x80\x04"
-            total_len = 0
-            for child in self.child_bytes:
-                total_len += len(child)
-            parent_list = [0] * (total_len + 5)
-            parent_list[0] = EMPTY_LIST
-            parent_list[1] = MEMOIZE
-            parent_list[2] = MARK
-            i = 3
-            current_memoize = 0
+        def process_bytecodes(parent_list, bytecode, thread, sj, ej):
+            j = sj
+            while j < ej:
+                b = bytecode[j]
 
-            for t, child in enumerate(self.child_bytes):
-                j = 0
-                while j < len(child):
+                if (thread, j) in defn_replacement:
+                    # needs to be replaced with binget
+                    s = j
+                    parent_list[self.i] = BINGET
+                    self.i += 1
+                    idx, e = defn_replacement[(thread, j)]
+                    parent_list[self.i] = idx.to_bytes()
+                    self.i += 1
+                    j += e - s
+                    continue
 
-                    b = child[j]
+                elif (
+                    b == MEMOIZE and j - 1 >= 0 and bytecode[j - 1] not in int_types
+                ):  # to do : b = memoize and memoize_mask[t][j] = 1
+                    self.current_memoize += 1
 
-                    if (t, j) in defn_replacement:
-                        # needs to be replaced with binget
-                        s = j
-                        parent_list[i] = BINGET
-                        i += 1
-                        idx, e = defn_replacement[(t, j)]
-                        parent_list[i] = idx.to_bytes()
-                        i += 1
-                        j += e - s
+                elif b == BINGET and j - 1 >= 0 and bytecode[j - 1] not in int_types:  # create a binget mask also
+                    bingetcode = int(bytecode[j + 1][0])
+                    if bingetcode in bingets:
+                        # need to be replaced with defn
+
+                        initial_memoize = self.current_memoize
+                        t_num, sp, ep = bingets[bingetcode]
+
+                        # keep absolute indexes
+                        process_bytecodes(parent_list, self.child_bytes[t_num], t_num, sp, ep)
+                        final_memoize = self.current_memoize
+                        if (
+                            self.child_bytes[t_num][sp] == EMPTY_LIST
+                            or self.child_bytes[t_num][sp] == EMPTY_DICT
+                            or self.child_bytes[t_num][sp] == EMPTY_SET
+                        ):
+                            old_to_new_binget[bingetcode] = initial_memoize + 1  # in case of list, dict, set
+                        else:
+                            old_to_new_binget[bingetcode] = final_memoize  # in case of tuples
+                        defn_replacement[(t_num, sp)] = bingetcode, ep
+                        j += 2
+
+                        # bingets needs to be replaced only once
+                        del bingets[bingetcode]
                         continue
 
-                    elif b == MEMOIZE and j - 1 >= 0 and child[j - 1] not in int_types:
-                        current_memoize += 1
+                parent_list[self.i] = b
+                self.i += 1
+                j += 1
 
-                    # handling strings
-                    elif b == SHORT_BINUNICODE and child[j - 1] not in int_types:
-                        current_memoize += 1
-                        parent_list[i] = child[j]
-                        i += 1
-                        j += 1
-                        len_of_s = int(child[j][0]) + 1  # + 1 for memoize
-                        parent_list[i] = child[j]
-                        i += 1
-                        j += 1
-                        while len_of_s:
-                            parent_list[i] = child[j]
-                            j += 1
-                            i += 1
-                            len_of_s -= 1
-                        continue
+        for t, child in enumerate(self.child_bytes):
+            process_bytecodes(parent_list, child, t, 0, len(child))
 
-                    elif b == BINGET and j - 1 >= 0 and child[j - 1] not in int_types:
-                        bingetcode = int(child[j + 1][0])
-                        if bingetcode in bingets:
-                            # need to replace with defn
-                            current_memoize += 1
-                            old_to_new_binget[bingetcode] = current_memoize
-                            t_num, sp, ep = bingets[bingetcode]
-                            k = sp
-                            while k != ep:
-                                if (
-                                    self.child_bytes[t_num][k] == SHORT_BINUNICODE
-                                    and self.child_bytes[t_num][k - 1] not in int_types
-                                ):
-                                    current_memoize += 1
-                                    parent_list[i] = self.child_bytes[t_num][k]
-                                    i += 1
-                                    k += 1
-                                    len_of_s = int(self.child_bytes[t_num][k][0]) + 1  # + 1 for memoize
-                                    parent_list[i] = self.child_bytes[t_num][k]
-                                    i += 1
-                                    k += 1
-                                    while len_of_s:
-                                        parent_list[i] = self.child_bytes[t_num][k]
-                                        i += 1
-                                        k += 1
-                                        len_of_s -= 1
-                                    continue
+        parent_list[-2] = APPENDS
+        parent_list[-1] = STOP
 
-                                if self.child_bytes[t_num][k] == MEMOIZE and self.child_bytes[t_num][k - 1] not in int_types:
-                                    current_memoize += 1
+        # replace old binget keys with actual binget keys
+        for i in range(len(parent_list)):
+            b = parent_list[i]
+            if b == BINGET:
+                if int(parent_list[i + 1][0]) in old_to_new_binget:
+                    parent_list[i + 1] = old_to_new_binget[int(parent_list[i + 1][0])].to_bytes()
 
-                                parent_list[i] = self.child_bytes[t_num][k]
-                                i += 1
-                                k += 1
-                            current_memoize -= 1  # for the extra memoize calculated in the defn
-                            j += 2
+        parent_list = b"".join(parent_list)
 
-                            # bingets needs to be replaced only once
-                            del bingets[bingetcode]
-                            continue
+        frame_info = FRAME + pack("<Q", 5 + total_len)
+        return PROTOCOL_VER + frame_info + parent_list
 
-                    parent_list[i] = b
-                    i += 1
-                    j += 1
-
-            parent_list[-2] = APPENDS
-            parent_list[-1] = STOP
-
-            # replace old binget keys with actual binget keys
-            for i in range(len(parent_list)):
-                b = parent_list[i]
-                if b == BINGET:
-                    if int(parent_list[i + 1][0]) in old_to_new_binget:
-                        parent_list[i + 1] = old_to_new_binget[int(parent_list[i + 1][0])].to_bytes()
-
-            parent_list = b"".join(parent_list)
-
-            frame_info = FRAME + pack("<Q", 5 + total_len)
-            return PROTOCOL_VER + frame_info + parent_list
-
-        return merge()
+        # return merge()
         # self.save(obj)
         # self.write(STOP)
         # self.framer.end_framing()
