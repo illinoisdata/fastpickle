@@ -469,11 +469,16 @@ class _Pickler:
         self.threads_access = {}  # maps id(obj) -> threads which accessed obj in the order accessed
         # self.local_memo = {} # for each thread, stores the number of items memoized in that thread.
         # self.r_memo = {}  # reverse memo, maps idx of memo -> thread_num, local_memo[thread_num]
+        self.r_memo = {}
+        self.memoize_dict = {}
         self.defns = {}  # maps id(obj) -> thread_num, start of defn for that obj, end of defn
         self.proto = int(protocol)
         self.bin = protocol >= 1
         self.fast = 0
         self.fix_imports = fix_imports and protocol < 3
+        self.thread_num = None
+        self.current_thread_bytecode_sp = None
+        self.binget_dict = {}
 
     def clear_memo(self):
         """Clears the pickler's "memo".
@@ -531,15 +536,15 @@ class _Pickler:
             # convert into list of bytes for easy manipulation later
             self.child_bytes[v] = [self.child_bytes[v][i : i + 1] for i in range(len(self.child_bytes[v]))]
 
-        int_types = [INT, BININT, BININT1, LONG, BININT2]
-
         bingets = {}  # bingets keys that needs to replaced with the defn
         old_to_new_binget = {}
         defn_replacement = {}  # maps the thread num, and the starting offset of the defn that needs to be replaced with binget
         # print("old_to_new_binget", old_to_new_binget)
-        print("bingets", bingets)
-        for child in self.child_bytes:
-            print("hi", b"".join(child))
+        # for child in self.child_bytes:
+        #     print("hi", b"".join(child))
+        # print(self.memo)
+        # print(self.threads_access)
+
         for id in self.threads_access:
             if len(set(self.threads_access[id])) > 1:
                 source_num = self.threads_access[id][0]  # thread which contains the defn
@@ -552,11 +557,8 @@ class _Pickler:
                     t_num,
                     sp,
                     ep,
-                )  # maps the binget code to the thread which contains the defn, and the sp and ep for that defn
-                # defn_replacement[(t_num, sp)] = (
-                #     idx,
-                #     ep,
-                # )  # reverse mapping, to identify which memoize needs to be replaced by BINGET
+                )
+                self.r_memo[idx] = id
                 assert t_num == source_num
 
         # merges the child bytecodes in a linear fashion
@@ -575,7 +577,6 @@ class _Pickler:
             j = sj
             while j < ej:
                 b = bytecode[j]
-
                 if (thread, j) in defn_replacement:
                     # needs to be replaced with binget
                     s = j
@@ -587,30 +588,34 @@ class _Pickler:
                     j += e - s
                     continue
 
-                elif (
-                    b == MEMOIZE and j - 1 >= 0 and bytecode[j - 1] not in int_types
-                ):  # to do : b = memoize and memoize_mask[t][j] = 1
+                elif b == MEMOIZE and (thread, j) in self.memoize_dict:
                     self.current_memoize += 1
+                    id = self.memoize_dict[(thread, j)]
+                    idx = self.memo[id][0]
+                    old_to_new_binget[idx] = self.current_memoize
 
-                elif b == BINGET and j - 1 >= 0 and bytecode[j - 1] not in int_types:  # create a binget mask also
+                elif b == BINGET and (thread, j) in self.binget_dict:
+                    # and j - 1 >= 0 and bytecode[j - 1] not in int_types:  # create a binget mask also
                     bingetcode = int(bytecode[j + 1][0])
+                    # print(thread, j)
+                    # print("binget dict", self.binget_dict)
                     if bingetcode in bingets:
                         # need to be replaced with defn
 
-                        initial_memoize = self.current_memoize
                         t_num, sp, ep = bingets[bingetcode]
 
                         # keep absolute indexes
                         process_bytecodes(parent_list, self.child_bytes[t_num], t_num, sp, ep)
                         final_memoize = self.current_memoize
-                        if (
-                            self.child_bytes[t_num][sp] == EMPTY_LIST
-                            or self.child_bytes[t_num][sp] == EMPTY_DICT
-                            or self.child_bytes[t_num][sp] == EMPTY_SET
-                        ):
-                            old_to_new_binget[bingetcode] = initial_memoize + 1  # in case of list, dict, set
-                        else:
-                            old_to_new_binget[bingetcode] = final_memoize  # in case of tuples
+
+                        # if isinstance(obj, (set, dict, list, str)):
+                        #     old_to_new_binget[bingetcode] = initial_memoize + 1
+                        # elif isinstance(obj, (tuple)):
+                        #     old_to_new_binget[bingetcode] = final_memoize
+                        # elif type(obj).__module__ != 'builtins':  # user-defined classes
+                        #     old_to_new_binget[bingetcode] = initial_memoize + 4
+                        # else:
+                        #     print(f"Not implemented for {type(obj)}")
                         defn_replacement[(t_num, sp)] = bingetcode, ep
                         j += 2
 
@@ -627,6 +632,7 @@ class _Pickler:
 
         parent_list[-2] = APPENDS
         parent_list[-1] = STOP
+        # print("old to new bingets", old_to_new_binget)
 
         # replace old binget keys with actual binget keys
         for i in range(len(parent_list)):
@@ -665,6 +671,9 @@ class _Pickler:
         assert id(obj) not in self.memo
         idx = len(self.memo)
         self.write(self.put(idx))
+        offset = self.framer.current_frame.tell()  # in the entire buffer
+        sp = self.current_thread_bytecode_sp
+        self.memoize_dict[(self.thread_num, offset - sp - 1)] = id(obj)  # offset should be relative to the current thread
         self.memo[id(obj)] = idx, obj
         # self.local_memo[self.thread_num] = self.local_memo.get(self.thread_num, 0) + 1
         # self.r_memo[idx] = self.thread_num, self.local_memo[self.thread_num]
@@ -700,8 +709,11 @@ class _Pickler:
             self.save_pers(pid)
             return
 
-        # Update the threads_access
-        if isinstance(obj, Collection):
+        primitive_types = (int, float, bool, bytes, type(None))
+
+        # Check if obj is not a primitive type
+        if not isinstance(obj, primitive_types):
+            # obj is a non-primitive, so update the threads_access
             if id(obj) not in self.threads_access:
                 self.threads_access[id(obj)] = [self.thread_num]
             else:
@@ -710,6 +722,9 @@ class _Pickler:
         # Check the memo
         x = self.memo.get(id(obj))
         if x is not None:
+            offset = self.framer.current_frame.tell()  # in the entire buffer
+            p = self.current_thread_bytecode_sp
+            self.binget_dict[(self.thread_num, offset - p)] = id(obj)  # offset should be relative to the current thread
             self.write(self.get(x[0]))
             return
 
@@ -738,27 +753,33 @@ class _Pickler:
             # copyreg.dispatch_table
             reduce = getattr(self, "dispatch_table", dispatch_table).get(t)
             if reduce is not None:
+                print("in 1")
                 rv = reduce(obj)
             else:
                 # Check for a class with a custom metaclass; treat as regular
                 # class
                 if issubclass(t, type):
+                    print("in 2")
                     self.save_global(obj)
                     return
 
                 # Check for a __reduce_ex__ method, fall back to __reduce__
                 reduce = getattr(obj, "__reduce_ex__", None)
+                print(reduce(4))
                 if reduce is not None:
+                    print("in 3")
                     rv = reduce(self.proto)
                 else:
                     reduce = getattr(obj, "__reduce__", None)
                     if reduce is not None:
+                        print("in 4")
                         rv = reduce()
                     else:
                         raise PicklingError("Can't pickle %r object: %r" % (t.__name__, obj))
 
         # Check for string returned by reduce(), meaning "save as global"
         if isinstance(rv, str):
+            print("in 5")
             self.save_global(obj, rv)
             return
 
@@ -772,7 +793,15 @@ class _Pickler:
             raise PicklingError("Tuple returned by %s must have " "two to six elements" % reduce)
 
         # Save the reduce() output and finally memoize the object
+        sp = self.framer.current_frame.tell()
         self.save_reduce(obj=obj, *rv)
+        ep = self.framer.current_frame.tell()
+        # maps id to thread num, sp, end
+        self.defns[id(obj)] = (
+            self.thread_num,
+            sp - self.current_thread_bytecode_sp,
+            ep - self.current_thread_bytecode_sp,
+        )
 
     def persistent_id(self, obj):
         # This exists so a subclass can override it
