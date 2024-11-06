@@ -1,4 +1,5 @@
 // threadpool.c
+#include <Python.h>
 #include "threadpool.h"
 #include <stdlib.h>
 #include <string.h>
@@ -8,46 +9,18 @@
 // a single unit of work, contains all information a thread would need
 // like which func to use, what's the arg, buffer to store information, index
 // for location information (important)
-typedef struct Task {
-    task_func function;  //function ptr for our task (void *)
-    void *arg;           //argument for task fun
-    struct Task *next;   //next task in queu
-    size_t index;        //index of our task, needed for result placement
-    char *output;        //output buffer for our task
-    size_t output_size;  //size of this data
-} Task;
 
-// basically a structure to represent a collection of worker threads
-// & a task queue for these workers to work on  
-struct ThreadPool {
-    pthread_t *threads;     //array of thread ids
-    int thread_count;       //#threads in our pool
-    Task *head;             //head of task queue
-    Task *tail;             //tail of the task queue
-    pthread_mutex_t lock;   //mutex specifically for access to the task queue
-    pthread_cond_t notify;  //condition variable to wake threads up when there's a new tsk
-    pthread_cond_t completed; //cond var to let threads know when all tasks have been fin
-    int stop;               //flag for when pool is closing
-    int started;            //number of 'active' threads
-    char **results;         // 2-d array to store result for each task
-    size_t *result_sizes;   // array to store sizes for each result/
-    size_t total_elements;  //expected number of tasks
-    size_t completed_tasks; //# of completed tasks
-    int *task_statuses; // 
-
-};
-
-ThreadPool* thread_pool_init(int thread_count, size_t initial_elements) {
+ThreadPool* thread_pool_init(int thread_count, size_t initial_elements, PyMemoTable *memo_table) {
     ThreadPool *pool;
     int i;
 
-    // validate input parameters
+    // Validate input parameters
     if (thread_count <= 0 || initial_elements == 0) {
         fprintf(stderr, "Invalid thread count or initial elements.\n");
         return NULL;
     }
 
-    //allocate memory for the pool
+    // Allocate memory for the pool
     if ((pool = (ThreadPool *)malloc(sizeof(ThreadPool))) == NULL) {
         goto err;
     }
@@ -59,6 +32,7 @@ ThreadPool* thread_pool_init(int thread_count, size_t initial_elements) {
     pool->head = pool->tail = NULL;
     pool->completed_tasks = 0;
     pool->total_elements = initial_elements;
+    pool->memo_table = memo_table;
 
     if ((pool->threads = (pthread_t *)malloc(sizeof(pthread_t) * thread_count)) == NULL) {
         goto err;
@@ -118,6 +92,7 @@ err:
 
 // add a new task to the queue for threads to pick up
 int thread_pool_add_pickle_task(ThreadPool *pool, task_func function, void *object, size_t index) {
+    // printf("thread_pool_add_pickle_task entry point\n");
     Task *task;
 
     if (pool == NULL || function == NULL || index >= pool->total_elements) {
@@ -127,7 +102,7 @@ int thread_pool_add_pickle_task(ThreadPool *pool, task_func function, void *obje
     if ((task = (Task *)malloc(sizeof(Task))) == NULL) {
         return -1;
     }
-
+    
     task->function = function;
     task->arg = object;
     task->index = index;
@@ -143,17 +118,23 @@ int thread_pool_add_pickle_task(ThreadPool *pool, task_func function, void *obje
         return -1;
     }
 
+       
     if (pool->tail == NULL) {
         pool->head = pool->tail = task;
+        // printf("successfully did  pool->head = pool->tail = task;\n");
     } else {
         pool->tail->next = task;
         pool->tail = task;
+        // printf("successfullymoved head to the next pointer\n");
     }
 
     // signal to thread to let it know that a new task is available
-    pthread_cond_signal(&(pool->notify));
-    pthread_mutex_unlock(&(pool->lock));
 
+    pthread_cond_signal(&(pool->notify));
+    // printf("signal check\n");
+    pthread_mutex_unlock(&(pool->lock));
+    // printf("unlocked mutex\n");
+    // printf("added a pickling task to our taskqueue\n");
     return 0;
 }
 
@@ -191,13 +172,14 @@ int thread_pool_destroy(ThreadPool *pool) {
     }
     free(pool->results);
     free(pool->result_sizes);
+    free(pool->task_statuses);
     free(pool);
 
     return 0;
 }
 
 
-static void *thread_do_work(void *pool) {
+void *thread_do_work(void *pool) {
     ThreadPool *thread_pool = (ThreadPool *)pool;
     Task *task;
     unsigned int seed = (unsigned int)time(NULL);
@@ -236,6 +218,9 @@ static void *thread_do_work(void *pool) {
             if (result == 0) {
                 thread_pool->results[task->index] = task->output;
                 thread_pool->result_sizes[task->index] = task->output_size;
+                thread_pool->task_statuses[task->index] = 0; // Success
+            } else {
+                thread_pool->task_statuses[task->index] = -1; // Failure
             }
             thread_pool->completed_tasks++;
             if (thread_pool->completed_tasks == thread_pool->total_elements) {

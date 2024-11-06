@@ -1,5 +1,5 @@
 // gcc -o test_pickle testpickle.c threadpool.c -pthread
-
+// sample serialization function
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

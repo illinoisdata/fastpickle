@@ -12,6 +12,12 @@
         "ratio": "c",
         "tuple": "c",
         "variant": "c",
-        "charconv": "c"
+        "charconv": "c",
+        "pycore_moduleobject.h": "c",
+        "pycore_bytesobject.h": "c",
+        "pycore_runtime.h": "c",
+        "string": "c",
+        "string_view": "c",
+        "vector": "c"
     }
 }
