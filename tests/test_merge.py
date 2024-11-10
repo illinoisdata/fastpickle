@@ -139,14 +139,31 @@ def test_class():
     assert our_bytecode == pickle.dumps(l)
 
 
-# def test_two_obj():
-#     obj = SampleClass(name="TestObject", values=[1, 2, 3, [4, 5, 6]])
-#     obj1 = SampleClass(name="TestObject1", values=[1, 2, 3])
-#     l = [obj, [obj, obj1]]
-#     # l = [obj, [4, 6, 7], set([0, 9])]
-#     pickling_order = [1, 0]
-#     our_bytecode = fastpickle.pardumps(l, pickling_order)
-#     assert our_bytecode == pickle.dumps(l)
+def test_shared_str():
+    shared_string = "cs"
+    l = [shared_string, [1, shared_string]]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_multiple_shared_str():
+    shared_string = "cs"
+    shared_string2 = "uiuc"
+    l = [[shared_string, shared_string2], [1, shared_string, shared_string2]]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_two_obj():
+    obj = SampleClass(name="TestObject", values=1)
+    obj1 = SampleClass(name="TestObject1", values=2)
+    l = [obj, [obj, obj1]]
+    # l = [obj, [4, 6, 7], set([0, 9])]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
 
 
 def test_shared_class():
