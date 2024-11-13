@@ -467,8 +467,6 @@ class _Pickler:
         self._write_large_bytes = self.framer.write_large_bytes
         self.memo = {}
         self.threads_access = {}  # maps id(obj) -> threads which accessed obj in the order accessed
-        # self.local_memo = {} # for each thread, stores the number of items memoized in that thread.
-        # self.r_memo = {}  # reverse memo, maps idx of memo -> thread_num, local_memo[thread_num]
         self.r_memo = {}
         self.memoize_dict = {}
         self.defns = {}  # maps id(obj) -> thread_num, start of defn for that obj, end of defn
@@ -535,24 +533,25 @@ class _Pickler:
             self.child_bytes[v] = self.framer.current_frame.getvalue()[p:]
             # convert into list of bytes for easy manipulation later
             self.child_bytes[v] = [self.child_bytes[v][i : i + 1] for i in range(len(self.child_bytes[v]))]
+            # print(v, b"".join(self.child_bytes[v]))
 
         bingets = {}  # bingets keys that needs to replaced with the defn
         old_to_new_binget = {}
         defn_replacement = {}  # maps the thread num, and the starting offset of the defn that needs to be replaced with binget
 
         for id_ in self.threads_access:
-            if len(set(self.threads_access[id_])) > 1:
+
+            if len(self.threads_access[id_]) > 1:
                 source_num = self.threads_access[id_][0]  # thread which contains the defn
-                target_num = min(self.threads_access[id_])  # thread which should contain the defn
-                if source_num == target_num:
-                    continue
                 idx, obj = self.memo[id_]
                 t_num, sp, ep = self.defns[id_]
+                # how to check for a particular idx if its defn has already been written?
                 bingets[idx] = (
                     t_num,
                     sp,
                     ep,
                 )
+
                 self.r_memo[idx] = id_
                 assert t_num == source_num
 
@@ -562,6 +561,7 @@ class _Pickler:
         for child in self.child_bytes:
             total_len += len(child)
         parent_list = [0] * (total_len + 5)
+
         parent_list[0] = EMPTY_LIST
         parent_list[1] = MEMOIZE
         parent_list[2] = MARK
@@ -573,6 +573,7 @@ class _Pickler:
             j = sj
             while j < ej:
                 b = bytecode[j]
+
                 if (thread, j) in defn_replacement:
                     # needs to be replaced with binget
                     s = j
@@ -592,10 +593,10 @@ class _Pickler:
 
                 elif b == BINGET and (thread, j) in self.binget_dict:
                     bingetcode = int(bytecode[j + 1][0])
+                    if bingetcode in bingets and bingetcode not in old_to_new_binget:
+                        # if bingetcode in old_to_new_binget -> its defn has already been written
 
-                    if bingetcode in bingets:
                         # need to be replaced with defn
-
                         t_num, sp, ep = bingets[bingetcode]
 
                         # keep absolute indexes
@@ -661,8 +662,6 @@ class _Pickler:
         sp = self.current_thread_bytecode_sp
         self.memoize_dict[(self.thread_num, offset - sp - 1)] = id(obj)  # offset should be relative to the current thread
         self.memo[id(obj)] = idx, obj
-        # self.local_memo[self.thread_num] = self.local_memo.get(self.thread_num, 0) + 1
-        # self.r_memo[idx] = self.thread_num, self.local_memo[self.thread_num]
 
     # Return a PUT (BINPUT, LONG_BINPUT) opcode string, with argument i.
     def put(self, idx):
@@ -696,14 +695,16 @@ class _Pickler:
             return
 
         primitive_types = (int, float, bool, bytes, type(None))
-
         # Check if obj is not a primitive type
         if not isinstance(obj, primitive_types):
             # obj is a non-primitive, so update the threads_access
-            if id(obj) not in self.threads_access:
-                self.threads_access[id(obj)] = [self.thread_num]
+            if isinstance(obj, tuple) and len(obj) == 0:
+                pass
             else:
-                self.threads_access[id(obj)].append(self.thread_num)
+                if id(obj) not in self.threads_access:
+                    self.threads_access[id(obj)] = [self.thread_num]
+                else:
+                    self.threads_access[id(obj)].append(self.thread_num)
 
         # Check the memo
         x = self.memo.get(id(obj))
@@ -751,7 +752,7 @@ class _Pickler:
 
                 # Check for a __reduce_ex__ method, fall back to __reduce__
                 reduce = getattr(obj, "__reduce_ex__", None)
-                print(reduce(4))
+                # print(reduce(4))
                 if reduce is not None:
                     print("in 3")
                     rv = reduce(self.proto)
@@ -815,6 +816,7 @@ class _Pickler:
         save = self.save
         write = self.write
 
+        # for saving class, args
         func_name = getattr(func, "__name__", "")
         if self.proto >= 2 and func_name == "__newobj_ex__":
             cls, args, kwargs = args
@@ -865,7 +867,7 @@ class _Pickler:
             if obj is not None and cls is not obj.__class__:
                 raise PicklingError("args[0] from __newobj__ args has the wrong class")
             args = args[1:]
-            save(cls)
+            save(cls)  # this triggers save_global()
             save(args)
             write(NEWOBJ)
         else:
@@ -873,6 +875,7 @@ class _Pickler:
             save(args)
             write(REDUCE)
 
+        # for saving obj
         if obj is not None:
             # If the object is already in the memo, this means it is
             # recursive. In this case, throw away everything we put on the
@@ -1064,6 +1067,7 @@ class _Pickler:
             else:
                 self.write(MARK + TUPLE)
             return
+        # empty tuple not memoized???
 
         n = len(obj)
         save = self.save
@@ -1279,7 +1283,9 @@ class _Pickler:
         if self.proto >= 4:
             self.save(module_name)
             self.save(name)
+            # basically <__main__.SampleClass object at 0x10473f650> is not a consolidated obj, it is stored separately in the form of module name and name, __main__ and SampleClass respectively
             write(STACK_GLOBAL)
+            # memoize after this doesn't belong to STACK_GLOBAL
         elif parent is not module:
             self.save_reduce(getattr, (parent, lastname))
         elif self.proto >= 3:
@@ -1298,7 +1304,7 @@ class _Pickler:
                 raise PicklingError(
                     "can't pickle global identifier '%s.%s' using " "pickle protocol %i" % (module, name, self.proto)
                 ) from None
-
+        # why this?
         self.memoize(obj)
 
     def save_type(self, obj):
