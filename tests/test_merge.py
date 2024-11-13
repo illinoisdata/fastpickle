@@ -19,7 +19,7 @@ def test_with_simple_shared_list():
     assert our_bytecode == pickle.dumps(l)
 
 
-def test_with_simple_shared_list():
+def test_with_simple_shared_list_og_order():
     shared_li = [1, 2, 6]
     l = [1, [2, [2, 3], shared_li], [3, shared_li]]
     pickling_order = [0, 1, 2]
@@ -170,5 +170,15 @@ def test_shared_class():
     obj = SampleClass(name="TestObject", values=[1, 2, 3, [4, 5, 6]])
     l = [obj, [4, 6, 7, obj], set([0, 9])]
     pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_two_shared_obj():
+    obj = SampleClass(name="TestObject", values=1)
+    obj1 = SampleClass(name="TestObject1", values=2)
+    l = [[obj1, obj], [obj, obj1]]
+    # l = [obj, [4, 6, 7], set([0, 9])]
+    pickling_order = [1, 0]
     our_bytecode = fastpickle.pardumps(l, pickling_order)
     assert our_bytecode == pickle.dumps(l)
