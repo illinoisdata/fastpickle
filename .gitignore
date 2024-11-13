@@ -136,3 +136,5 @@ dmypy.json
 
 # fastpickle specifics.
 .venv/
+
+.DS_Store

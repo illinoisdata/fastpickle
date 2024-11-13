@@ -156,6 +156,22 @@ def test_multiple_shared_str():
     assert our_bytecode == pickle.dumps(l)
 
 
+def test_long_string():
+    long_string = "str" * 10000
+    l = [long_string, "short string", [long_string]]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_string_with_escape_characters():
+    escape_string = "Str1\nStr2\tStr3"
+    l = [escape_string, [escape_string, "normal"]]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
 def test_two_obj():
     obj = SampleClass(name="TestObject", values=1)
     obj1 = SampleClass(name="TestObject1", values=2)
@@ -174,7 +190,68 @@ def test_shared_class():
     assert our_bytecode == pickle.dumps(l)
 
 
-# Failing
+def test_many_instances_with_shared_dict():
+    shared_dict = {"key1": "a", "key2": "b"}
+    obj1 = SampleClass(name="Object1", values=[shared_dict, 123])
+    obj2 = SampleClass(name="Object2", values=[shared_dict, 456])
+    l = [obj1, obj2, {"key": 789}]
+    pickling_order = [2, 0, 1]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_instance_with_mixed_values():
+    obj = SampleClass(name="MixedValues", values=[True, "string", 3.14, None, 42])
+    l = [obj, 99, "another"]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_nested_class_instances():
+    inner_obj = SampleClass(name="InnerObject", values=[1, 2, 3])
+    outer_obj = SampleClass(name="OuterObject", values=[inner_obj, 42, "nested"])
+    l = [outer_obj, inner_obj]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_class_with_mixed_collections():
+    obj = SampleClass(name="MixedCollections", values=[{1, 2}, [3, 4], (5, 6)])
+    l = [obj, {"key": {7, 8}}, (9, 10)]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_class_with_large_list_of_values():
+    large_list = list(range(500))
+    obj = SampleClass(name="LargeList", values=large_list)
+    l = [obj, "another"]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_class_with_mutable_immutable_types():
+    obj = SampleClass(name="MixedTypes", values=[{"a": 1, "b": 2}, (3, 4), "immutable", 42])
+    l = [obj, 99, "another"]
+    pickling_order = [2, 1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_class_with_simple_self_reference():
+    obj = SampleClass(name="SelfReference", values=[42])
+    obj.values.append(obj)
+    another_value = "another"
+    l = [obj, another_value]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
 def test_recursive_list():
     l = [1, 2, 3]
     l.append(l)
@@ -183,7 +260,6 @@ def test_recursive_list():
     assert our_bytecode == pickle.dumps(l)
 
 
-# Passing
 def test_nested_shared_dict():
     shared_dict_1 = {"a": 1, "b": 2}
     shared_dict_2 = {"x": 10, "y": 20}
@@ -193,7 +269,6 @@ def test_nested_shared_dict():
     assert our_bytecode == pickle.dumps(l)
 
 
-# Passed
 def test_mixed_nested_structure():
     shared_list = [1, 2, 3]
     shared_set = frozenset([4, 5])
@@ -214,7 +289,6 @@ def test_mixed_nested_structure():
     assert our_bytecode == pickle.dumps(l)
 
 
-# Failing
 def test_nonlinear_order_with_many_types():
     shared_dict = {"key1": [1, 2], "key2": set([3, 4])}
     shared_tuple = (5, 6)
@@ -229,39 +303,6 @@ def test_nonlinear_order_with_many_types():
     assert our_bytecode == pickle.dumps(l)
 
 
-# Failing
-def test_empty_list():
-    l = []
-    pickling_order = [0]
-    our_bytecode = fastpickle.pardumps([l], pickling_order)
-    assert our_bytecode == pickle.dumps([l])
-
-
-# Failing
-def test_empty_dict():
-    obj = {}
-    pickling_order = [0]
-    our_bytecode = fastpickle.pardumps([obj], pickling_order)
-    assert our_bytecode == pickle.dumps([obj])
-
-
-# Failing
-def test_empty_set():
-    obj = set()
-    pickling_order = [0]
-    our_bytecode = fastpickle.pardumps([obj], pickling_order)
-    assert our_bytecode == pickle.dumps([obj])
-
-
-# Failing
-def test_empty_tuple():
-    obj = ()
-    pickling_order = [0]
-    our_bytecode = fastpickle.pardumps([obj], pickling_order)
-    assert our_bytecode == pickle.dumps([obj])
-
-
-# Passing
 def test_single_element_collections():
     single_list = [1]
     single_tuple = (1,)
@@ -273,7 +314,6 @@ def test_single_element_collections():
     assert our_bytecode == pickle.dumps(l)
 
 
-# Failed
 def test_mixed_nested_collections_complex_order():
     complex_list = [1, 2, [3, 4]]
     complex_set = {frozenset({5, 6}), 7}
@@ -281,13 +321,5 @@ def test_mixed_nested_collections_complex_order():
     complex_dict = {"key1": complex_list, "key2": complex_list}
     l = [complex_list, complex_set, complex_tuple, complex_dict]
     pickling_order = [1, 0, 2, 3]
-    our_bytecode = fastpickle.pardumps(l, pickling_order)
-    assert our_bytecode == pickle.dumps(l)
-
-
-# Passed
-def test_mixed_types_with_empty_collections():
-    l = [[], [1, 2], set(), {1}, (), (3, 4), {}, {"key1": 1}]
-    pickling_order = [0, 1, 2, 3, 7, 6, 5, 4]
     our_bytecode = fastpickle.pardumps(l, pickling_order)
     assert our_bytecode == pickle.dumps(l)

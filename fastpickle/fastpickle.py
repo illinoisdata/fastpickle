@@ -210,7 +210,6 @@ __all__.extend([x for x in dir() if re.match("[A-Z][A-Z0-9_]+$", x)])
 
 
 class _Framer:
-
     _FRAME_SIZE_MIN = 4
     _FRAME_SIZE_TARGET = 64 * 1024
 
@@ -273,7 +272,6 @@ class _Framer:
 
 
 class _Unframer:
-
     def __init__(self, file_read, file_readline, file_tell=None):
         self.file_read = file_read
         self.file_readline = file_readline
@@ -414,7 +412,6 @@ def decode_long(data):
 
 
 class _Pickler:
-
     def __init__(self, file, protocol=None, *, fix_imports=True, buffer_callback=None):
         """This takes a binary file for writing a pickle data stream.
 
@@ -1316,7 +1313,6 @@ class _Pickler:
 
 
 class _Unpickler:
-
     def __init__(self, file, *, fix_imports=True, encoding="ASCII", errors="strict", buffers=None):
         """This takes a binary file for reading a pickle data stream.
 
