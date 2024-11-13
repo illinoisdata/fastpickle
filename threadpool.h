@@ -10,6 +10,7 @@
 extern "C" {
 #endif
 
+//  structs used for the memoization table
 typedef struct {
     PyObject *me_key;
     Py_ssize_t me_value;
@@ -20,7 +21,7 @@ typedef struct {
     size_t mt_used;
     size_t mt_allocated;
     PyMemoEntry *mt_table; 
-    pthread_mutex_t mt_lock;  // Threads will hold onto this
+    pthread_mutex_t mt_lock;  // Threads will hold onto this lock 
 } PyMemoTable;
 
 typedef int (*task_func)(void *object, char **output, size_t *output_size);

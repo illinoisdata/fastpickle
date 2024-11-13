@@ -1,0 +1,8 @@
+README.md
+_pickle.c
+setup.py
+threadpool.c
+faster_pickle.egg-info/PKG-INFO
+faster_pickle.egg-info/SOURCES.txt
+faster_pickle.egg-info/dependency_links.txt
+faster_pickle.egg-info/top_level.txt

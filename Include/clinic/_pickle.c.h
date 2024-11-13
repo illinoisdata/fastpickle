@@ -40,6 +40,9 @@ static int write_list_end(PicklerObject *self);
 void copy_pickler_config(PicklerObject *dest, PicklerObject *src);
 // addition of my dumpV2 declaration
 static int dumpV2(PicklerObject *self, PyObject *obj);
+static int batch_list_threaded(PicklerObject *self, PyObject *iter);
+static int batch_list_exact_threaded(PicklerObject *self, PyObject *obj);
+static int serialize_element(void *object, char **output, size_t *output_size);
 
 PyDoc_STRVAR(_pickle_Pickler___sizeof____doc__,
 "__sizeof__($self, /)\n"

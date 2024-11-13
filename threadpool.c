@@ -209,8 +209,8 @@ void *thread_do_work(void *pool) {
 
         if (task != NULL) {
             // Random sleep between 0.1 and 1 second
-            int sleep_time_us = (rand_r(&seed) % 901000) + 100000; // 100,000 to 1,000,000 microseconds
-            usleep(sleep_time_us);
+            // int sleep_time_us = (rand_r(&seed) % 901000) + 100000; // 100,000 to 1,000,000 microseconds
+            // usleep(sleep_time_us);
 
             int result = (*(task->function))(task->arg, &task->output, &task->output_size);
 
