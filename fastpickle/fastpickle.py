@@ -522,8 +522,8 @@ class _Pickler:
 
         assert len(obj) == len(pickling_order)
 
-        # dummy element, -1 can never be the id of an object
-        self.memo[-1] = None
+        # memoize the parent node
+        self.memo[id(obj)] = 0, obj
 
         self.pickling_order = pickling_order
         self.child_bytes = [0] * len(obj)
@@ -540,20 +540,20 @@ class _Pickler:
         old_to_new_binget = {}
         defn_replacement = {}  # maps the thread num, and the starting offset of the defn that needs to be replaced with binget
 
-        for id in self.threads_access:
-            if len(set(self.threads_access[id])) > 1:
-                source_num = self.threads_access[id][0]  # thread which contains the defn
-                target_num = min(self.threads_access[id])  # thread which should contain the defn
+        for id_ in self.threads_access:
+            if len(set(self.threads_access[id_])) > 1:
+                source_num = self.threads_access[id_][0]  # thread which contains the defn
+                target_num = min(self.threads_access[id_])  # thread which should contain the defn
                 if source_num == target_num:
                     continue
-                idx, obj = self.memo[id]
-                t_num, sp, ep = self.defns[id]
+                idx, obj = self.memo[id_]
+                t_num, sp, ep = self.defns[id_]
                 bingets[idx] = (
                     t_num,
                     sp,
                     ep,
                 )
-                self.r_memo[idx] = id
+                self.r_memo[idx] = id_
                 assert t_num == source_num
 
         # merges the child bytecodes in a linear fashion
@@ -567,6 +567,7 @@ class _Pickler:
         parent_list[2] = MARK
         self.i = 3
         self.current_memoize = 0
+        old_to_new_binget[0] = 0  # for the parent
 
         def process_bytecodes(parent_list, bytecode, thread, sj, ej):
             j = sj
@@ -578,19 +579,18 @@ class _Pickler:
                     parent_list[self.i] = BINGET
                     self.i += 1
                     idx, e = defn_replacement[(thread, j)]
-                    parent_list[self.i] = idx.to_bytes()
+                    parent_list[self.i] = old_to_new_binget[idx].to_bytes()
                     self.i += 1
                     j += e - s
                     continue
 
                 elif b == MEMOIZE and (thread, j) in self.memoize_dict:
                     self.current_memoize += 1
-                    id = self.memoize_dict[(thread, j)]
-                    idx = self.memo[id][0]
+                    id_ = self.memoize_dict[(thread, j)]
+                    idx = self.memo[id_][0]
                     old_to_new_binget[idx] = self.current_memoize
 
                 elif b == BINGET and (thread, j) in self.binget_dict:
-                    # and j - 1 >= 0 and bytecode[j - 1] not in int_types:  # create a binget mask also
                     bingetcode = int(bytecode[j + 1][0])
 
                     if bingetcode in bingets:
@@ -607,6 +607,15 @@ class _Pickler:
                         # bingets needs to be replaced only once
                         del bingets[bingetcode]
                         continue
+                    else:
+                        # needs to be replaced by a new binget
+                        parent_list[self.i] = b
+                        self.i += 1
+                        j += 1
+                        parent_list[self.i] = old_to_new_binget[bingetcode].to_bytes()
+                        self.i += 1
+                        j += 1
+                        continue
 
                 parent_list[self.i] = b
                 self.i += 1
@@ -617,13 +626,6 @@ class _Pickler:
 
         parent_list[-2] = APPENDS
         parent_list[-1] = STOP
-
-        # replace old binget keys with actual binget keys
-        for i in range(len(parent_list)):
-            b = parent_list[i]
-            if b == BINGET:
-                if int(parent_list[i + 1][0]) in old_to_new_binget:
-                    parent_list[i + 1] = old_to_new_binget[int(parent_list[i + 1][0])].to_bytes()
 
         parent_list = b"".join(parent_list)
 
