@@ -2026,8 +2026,9 @@ def _loads(s, /, *, fix_imports=True, encoding="ASCII", errors="strict", buffers
 
 # Use the faster _pickle if possible
 try:
-    from fickle import PickleError, Pickler, PicklingError, Unpickler, UnpicklingError, dump, dumps, load, loads
+    from _fastpickle import PickleError, Pickler, PicklingError, Unpickler, UnpicklingError, dump, dumps, load, loads
 except ImportError:
+    print("hello")
     Pickler, Unpickler = _Pickler, _Unpickler
     dump, dumps, load, loads, pardumps = _dump, _dumps, _load, _loads, _pardumps
 

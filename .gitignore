@@ -136,3 +136,6 @@ dmypy.json
 
 # fastpickle specifics.
 .venv/
+
+# vscode
+**/.vscode/

@@ -4,8 +4,8 @@ from setuptools import Extension, setup
 # Modules to be compiled and include_dirs when necessary
 c_extensions = [
     Extension(
-        '_pickle',
-        sources=['src/_pickle.c'],
+        '_fastpickle',
+        sources=['src/_fastpickle.c'],
         include_dirs=['include/internal', 'include'],
         extra_compile_args=[
             '-fno-strict-overflow',
@@ -22,6 +22,6 @@ c_extensions = [
 
 setup(
     ext_modules=[
-        # *c_extensions,  # TODO: Broken on LLVM
+        *c_extensions,  # TODO: Broken on LLVM
     ],
 )
