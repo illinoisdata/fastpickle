@@ -34,16 +34,6 @@ PyDoc_STRVAR(_pickle_Pickler_dump__doc__,
 #define _PICKLE_PICKLER_DUMP_METHODDEF    \
     {"dump", (PyCFunction)_pickle_Pickler_dump, METH_O, _pickle_Pickler_dump__doc__},
 
-//addition of write_list_start and write_list_end
-static int write_list_start(PicklerObject *self);
-static int write_list_end(PicklerObject *self);
-void copy_pickler_config(PicklerObject *dest, PicklerObject *src);
-// addition of my dumpV2 declaration
-static int dumpV2(PicklerObject *self, PyObject *obj);
-static int batch_list_threaded(PicklerObject *self, PyObject *iter);
-static int batch_list_exact_threaded(PicklerObject *self, PyObject *obj);
-static int serialize_element(void *object, char **output, size_t *output_size);
-
 PyDoc_STRVAR(_pickle_Pickler___sizeof____doc__,
 "__sizeof__($self, /)\n"
 "--\n"
@@ -576,6 +566,7 @@ PyDoc_STRVAR(_pickle_dumps__doc__,
 "If *buffer_callback* is None (the default), buffer views are serialized\n"
 "into *file* as part of the pickle stream.  It is an error if\n"
 "*buffer_callback* is not None and *protocol* is None or smaller than 5.");
+
 #define _PICKLE_DUMPS_METHODDEF    \
     {"dumps", _PyCFunction_CAST(_pickle_dumps), METH_FASTCALL|METH_KEYWORDS, _pickle_dumps__doc__},
 

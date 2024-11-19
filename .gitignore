@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+# Additional file for local testing
+main.py
+
 # Distribution / packaging
 .Python
 build/
@@ -104,7 +107,6 @@ celerybeat.pid
 # Environments
 .env*
 .venv*
-tests/
 env/
 venv/
 ENV/
@@ -132,7 +134,5 @@ dmypy.json
 # templates
 .github/templates/*
 
-# Pod specifics.
-nbdata/
-tmp/
-*result/
+# fastpickle specifics.
+.venv/
