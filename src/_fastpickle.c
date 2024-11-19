@@ -7755,6 +7755,7 @@ _pickle_dump_impl(PyObject *module, PyObject *obj, PyObject *file,
     return NULL;
 }
 
+
 /*[clinic input]
 
 _pickle.dumps
@@ -7786,6 +7787,60 @@ into *file* as part of the pickle stream.  It is an error if
 
 [clinic start generated code]*/
 
+// static PyObject *
+// _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
+//                    int fix_imports, PyObject *buffer_callback)
+// /*[clinic end generated code: output=fbab0093a5580fdf input=e543272436c6f987]*/
+// {
+//     printf("inside C fastpickle!!!\n");
+//     PyObject *result;
+//     PicklerObject *pickler = _Pickler_New();
+
+//     if (pickler == NULL)
+//         return NULL;
+
+//     if (_Pickler_SetProtocol(pickler, protocol, fix_imports) < 0)
+//         goto error;
+
+//     if (_Pickler_SetBufferCallback(pickler, buffer_callback) < 0)
+//         goto error;
+
+//     if (dump(pickler, obj) < 0)
+//         goto error;
+
+//     result = _Pickler_GetString(pickler);
+//     Py_DECREF(pickler);
+//     return result;
+
+//   error:
+//     Py_XDECREF(pickler);
+//     return NULL;
+// }
+
+
+void print_pybytes(PyObject *bytes_obj) {
+    // Ensure the input is a valid bytes object
+    if (!PyBytes_Check(bytes_obj)) {
+        fprintf(stderr, "Error: Not a bytes object.\n");
+        return;
+    }
+
+    // Get the raw byte data and its size
+    char *data = PyBytes_AS_STRING(bytes_obj);
+    Py_ssize_t size = PyBytes_GET_SIZE(bytes_obj);
+
+    printf("Bytes content (raw): ");
+    for (Py_ssize_t i = 0; i < size; i++) {
+        unsigned char byte = (unsigned char)data[i];
+        if (isprint(byte)) {
+            printf("%c ", byte); // Print printable characters directly
+        } else {
+            printf("\\x%02x", byte); // Print non-printable characters as hex
+        }
+    }
+    printf("\n");
+}
+
 static PyObject *
 _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
                    int fix_imports, PyObject *buffer_callback)
@@ -7793,27 +7848,159 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
 {
     printf("inside C fastpickle!!!\n");
     PyObject *result;
-    PicklerObject *pickler = _Pickler_New();
+    // PyMemoTable *common_memo = PyMemoTable_New();
+    // if (common_memo == NULL) {
+    //     return PyErr_NoMemory();
+    // }
+    // PicklerObject *pickler = _Pickler_New();
+    
+    PyObject *pickling_order;
+    
+    // Create the pickling_order list with the values [3, 2, 1]
+    pickling_order = PyList_New(3);  // Create a list with 3 elements
+    if (pickling_order == NULL) {
+        return PyErr_NoMemory();
+    }
 
-    if (pickler == NULL)
+    // Populate the list with integers
+    PyList_SetItem(pickling_order, 0, PyLong_FromLong(2));  // Index 0: 3
+    PyList_SetItem(pickling_order, 1, PyLong_FromLong(1));  // Index 1: 2
+    PyList_SetItem(pickling_order, 2, PyLong_FromLong(0));  // Index 2: 1
+
+    PyObject_Print(pickling_order, stdout, 0);
+    PyObject_Print(obj, stdout, 0);
+
+    // TO DO : add check for len(pickling_order) == len(obj)
+
+    Py_ssize_t pickling_order_len = PyList_Size(pickling_order);
+    if (pickling_order_len < 0) {
+        return NULL;  // Handle error if pickling_order is not a list or another issue occurs
+    }
+
+    // Array to store results from each PicklerObject
+    PyObject **results = PyMem_Calloc(pickling_order_len, sizeof(PyObject *));
+    if (results == NULL) {
+        PyErr_NoMemory();
         return NULL;
+    }
+    Py_ssize_t parent_list_len = 0;
 
-    if (_Pickler_SetProtocol(pickler, protocol, fix_imports) < 0)
+    // LOOP through each element of the list
+    for (Py_ssize_t i = 0; i < pickling_order_len; i++) {
+
+        PicklerObject *pickler = _Pickler_New();
+        if (pickler == NULL)
+            return NULL;
+        
+        // Replace pickler->memo with common_memo
+        // PyMemoTable_Clear(pickler->memo);  // Free the existing memo in the pickler
+        // PyMem_Free(pickler->memo);
+        // Assign the shared memo
+        // pickler->memo = common_memo;
+        // printf("memo size : %zd", PyMemoTable_Size(pickler->memo));
+        // printf("common memo size : %zd", PyMemoTable_Size(common_memo));
+        // print_memo_table(pickler->memo);
+    
+        if (_Pickler_SetProtocol(pickler, protocol, fix_imports) < 0)
+            goto error;
+
+        if (_Pickler_SetBufferCallback(pickler, buffer_callback) < 0)
+            goto error;
+
+        PyObject *order_index = PyList_GetItem(pickling_order, i);  // Borrowed reference
+        Py_ssize_t index = PyLong_AsSsize_t(order_index);
+        
+        PyObject *element = PyList_GetItem(obj, index);  // Borrowed reference
+        if (element == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get element from obj");
+            goto error;
+        }
+        
+        printf("\nDumping element at index %zd (from pickling_order): ", index);
+        PyObject_Print(element, stdout, 0);
+        printf("\n");
+        if (dump(pickler, element) < 0)
+            goto error;
+
+        result = _Pickler_GetString(pickler);
+
+        // Skip the protocol header (\x80\x04\x95...) and STOP (.)
+        parent_list_len += PyBytes_GET_SIZE(result) - 12;
+
+        // Store the result in the results array
+        results[i] = result;
+
+        Py_DECREF(pickler);
+    }
+    
+    // To do : make the pickler objects share one memo table
+    parent_list_len += 5;
+    printf("\nparent list len %zd", parent_list_len);
+    // After the loop, results array contains serialized strings from each PicklerObject
+    printf("\nSuccessfully created and stored results for %zd objects.\n", pickling_order_len);
+    for (Py_ssize_t i = 0; i < pickling_order_len; i++) {
+        printf("Result %zd: ", i);
+        PyObject_Print(results[i], stdout, 0);
+        printf("\n");
+    }
+
+    // Buffer for storing the parent bytecode
+    PyObject *parent_bytecode = PyBytes_FromStringAndSize(NULL, parent_list_len);
+    if (parent_bytecode == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate memory for parent bytecode");
         goto error;
+    }
+    Py_ssize_t p = 0;
+    // Loop through each result and concatenate relevant portions
+    for (Py_ssize_t i = 0; i < pickling_order_len; i++) {
+        
+        
+        PyObject_Print(results[i], stdout, 0);
+        // print_pybytes(results[i]);
+        char *result_data = PyBytes_AS_STRING(results[i]);
+        Py_ssize_t result_size = PyBytes_GET_SIZE(results[i]);
+        // printf("Result data : %s\n", result_data);
+        // printf("Result size : %zd\n", result_size);
+        for (int j = 12; j < result_size; j++) {
+             printf("%x ", (unsigned char)result_data[j]); // this will print the hex
+            // will need to compare with hex values!
 
-    if (_Pickler_SetBufferCallback(pickler, buffer_callback) < 0)
-        goto error;
+            //  printf("%c\n", (unsigned char) result_data[j]);  
+            unsigned char byte = (unsigned char)result_data[j];
+            printf("%x ", byte); // Print the byte in hexadecimal
 
-    if (dump(pickler, obj) < 0)
-        goto error;
+            if (byte == 0x94) {
+                printf("hi "); // Print "hi" when the byte is 0x94
+            }
 
-    result = _Pickler_GetString(pickler);
-    Py_DECREF(pickler);
-    return result;
+            
+            // printf("0x%hhX\n", result_data[j] & 0xff);  
+              
+        }
+    }
 
-  error:
-    Py_XDECREF(pickler);
+    // // DEBUG: Print the parent bytecode
+    // printf("Parent Bytecode: ");
+    // PyObject_Print(parent_bytecode, stdout, 0);
+    // printf("\n");
+
+    // Clean up the results array
+    for (Py_ssize_t i = 0; i < pickling_order_len; i++) {
+        Py_DECREF(results[i]);
+    }
+    PyMem_Free(results);
+    return Py_None;
+
+    // Error cleanup block
+    error:
+    for (Py_ssize_t j = 0; j < pickling_order_len; j++) {
+        Py_DECREF(results[j]);  // Safely decref NULL pointers
+    }
+    PyMem_Free(results);
+    // Py_XDECREF(common_memo);
+    // Py_DECREF(pickler);
     return NULL;
+
 }
 
 /*[clinic input]
@@ -7949,6 +8136,7 @@ static struct PyMethodDef pickle_methods[] = {
     _PICKLE_DUMPS_METHODDEF
     _PICKLE_LOAD_METHODDEF
     _PICKLE_LOADS_METHODDEF
+    // {"pardumps", (PyCFunction)_pickle_pardumps, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("pardumps(obj, pickling_order) -> bytes\n\nCustomized dumps() for parallelization.")},
     {NULL, NULL} /* sentinel */
 };
 
