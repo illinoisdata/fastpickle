@@ -25,9 +25,9 @@ def test_dumps():
     shared = 99
     ints = [1,shared, 2,3,4, 14]
     bools = [False, True,False]
-    mixed = [1,23,31, 23, 111, 1]
+    mixed = [1,bools,31, chars, spec, 1]
     # [a,b,c]
-    lst = bools
+    lst = mixed
 
     try:
         out = p.dumps(lst)
