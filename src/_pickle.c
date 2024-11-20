@@ -2,6 +2,17 @@
  *
  * It is built as a built-in module (Py_BUILD_CORE_BUILTIN define) on Windows
  * and as an extension module (Py_BUILD_CORE_MODULE define) on other
+ * 
+ * 
+ * platforms. */
+
+
+// github link for opcodes
+// https://gist.github.com/AdityaKunte18/93a4a49d5501b36dce914d28b51243d4
+/* pickle accelerator C extensor: _pickle module.
+ *
+ * It is built as a built-in module (Py_BUILD_CORE_BUILTIN define) on Windows
+ * and as an extension module (Py_BUILD_CORE_MODULE define) on other
  * platforms. */
 
 #ifndef Py_BUILD_CORE_BUILTIN
@@ -14,11 +25,29 @@
 #include "pycore_runtime.h"       // _Py_ID()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "structmember.h"         // PyMemberDef
+#include "threadpool.h"
 
 #include <stdlib.h>               // strtol()
 
 PyDoc_STRVAR(pickle_module_doc,
 "Optimized C implementation for the Python pickle module.");
+
+int dbug_val = 1;
+
+pthread_mutex_t llock = PTHREAD_MUTEX_INITIALIZER;
+
+void lmsg(const char *format, ...) {
+    if (dbug_val == 0) {
+        va_list args;
+        va_start(args, format);
+        pthread_mutex_lock(&llock);
+        vprintf(format, args);
+        fflush(stdout);
+        pthread_mutex_unlock(&llock);
+        va_end(args);
+    }
+}
+
 
 /*[clinic input]
 module _pickle
@@ -663,6 +692,9 @@ typedef struct PicklerObject {
                                    the name of globals for Python 2.x. */
     PyObject *fast_memo;
     PyObject *buffer_callback;  /* Callback for out-of-band buffers, or NULL */
+
+
+    // pthread_mutex_t buffer_lock;  // lock for the output buffer modification 
 } PicklerObject;
 
 typedef struct UnpicklerObject {
@@ -1004,13 +1036,19 @@ _Pickler_GetString(PicklerObject *self)
 
     assert(self->output_buffer != NULL);
 
-    if (_Pickler_CommitFrame(self))
+    if (_Pickler_CommitFrame(self)) {
         return NULL;
+    }
+    // printf("\033[31m_Pickler_GetString: CommitFrame successfull\033[0m\n");
 
     self->output_buffer = NULL;
     /* Resize down to exact size */
-    if (_PyBytes_Resize(&output_buffer, self->output_len) < 0)
+    if (_PyBytes_Resize(&output_buffer, self->output_len) < 0) {
         return NULL;
+    }
+
+    // printf("\033[31m_Pickler_GetString: _PyBytes_Resize successfull, returning output buffer\033[0m\n");
+        
     return output_buffer;
 }
 
@@ -1066,6 +1104,12 @@ _Pickler_OpcodeBoundary(PicklerObject *self)
 static Py_ssize_t
 _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
 {
+
+    if (self->output_buffer == NULL) {
+        lmsg("PicklerWrite: output buffer is somehow null\n");
+        PyErr_SetString(PyExc_RuntimeError, "Output buffer is not initialized.");
+        return -1;
+    }
     Py_ssize_t i, n, required;
     char *buffer;
     int need_new_frame;
@@ -1079,19 +1123,30 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
         n = data_len;
 
     required = self->output_len + n;
+
+    lmsg("_Pickler_Write: Attempting to write %zd bytes (need_new_frame=%d)\n", data_len, need_new_frame);
+    // pthread_mutex_lock(&self->buffer_lock); 
     if (required > self->max_output_len) {
         /* Make place in buffer for the pickle chunk */
         if (self->output_len >= PY_SSIZE_T_MAX / 2 - n) {
             PyErr_NoMemory();
+            // pthread_mutex_unlock(&self->buffer_lock); // Unlock after accessing buffer
             return -1;
         }
         self->max_output_len = (self->output_len + n) / 2 * 3;
-        if (_PyBytes_Resize(&self->output_buffer, self->max_output_len) < 0)
+        if (_PyBytes_Resize(&self->output_buffer, self->max_output_len) < 0) {
+            lmsg("_Pickler_Write: Failed to resize output buffer to %zd bytes\n", self->max_output_len);
+            // pthread_mutex_unlock(&self->buffer_lock); // Unlock after accessing buffer
             return -1;
+        } else {
+            lmsg("_Pickler_Write: Resized output buffer to %zd bytes\n", self->max_output_len);
+        }
+            
     }
     buffer = PyBytes_AS_STRING(self->output_buffer);
     if (need_new_frame) {
         /* Setup new frame */
+        lmsg("_Pickler_Write: Need to create a new frame. Adding FRAME_HEADER_SIZE %d bytes\n", FRAME_HEADER_SIZE);
         Py_ssize_t frame_start = self->output_len;
         self->frame_start = frame_start;
         for (i = 0; i < FRAME_HEADER_SIZE; i++) {
@@ -1099,6 +1154,7 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
             buffer[frame_start + i] = 0xFE;
         }
         self->output_len += FRAME_HEADER_SIZE;
+        lmsg("_Pickler_Write: Created new frame starting at %zd\n", frame_start);
     }
     if (data_len < 8) {
         /* This is faster than memcpy when the string is short. */
@@ -1110,6 +1166,8 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
         memcpy(buffer + self->output_len, s, data_len);
     }
     self->output_len += data_len;
+    lmsg("_Pickler_Write: Successfully wrote %zd bytes. Total output length is now %zd bytes\n", data_len, self->output_len);
+    // pthread_mutex_unlock(&self->buffer_lock); 
     return data_len;
 }
 
@@ -1131,6 +1189,9 @@ _Pickler_New(void)
     if (self == NULL) {
         goto error;
     }
+
+    // self->buffer_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+
 
     self->memo = memo;
     self->pers_func = NULL;
@@ -2894,178 +2955,357 @@ save_tuple(PicklerObject *self, PyObject *obj)
     return 0;
 }
 
-/* iter is an iterator giving items, and we batch up chunks of
- *     MARK item item ... item APPENDS
- * opcode sequences.  Calling code should have arranged to first create an
- * empty list, or list-like object, for the APPENDS to operate on.
- * Returns 0 on success, <0 on error.
- */
+
+// change
+// added a function for thread_do_work to utilize, added task argument struct
+typedef struct {
+    PyObject *item;
+    int protocol;
+    Py_ssize_t index;
+} TaskArgument;
+
+int pickle_task_function(void *arg, char **output, size_t *output_size)
+{
+    TaskArgument *task_arg = (TaskArgument *)arg;
+    PyObject *item = task_arg->item;
+    int protocol = task_arg->protocol;
+
+    PyObject *item_str = PyObject_Repr(item);
+    if (item_str == NULL) {
+        lmsg("Thread %lu: Failed to get string representation of item at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        free(task_arg);
+        return -1;
+    }
+
+    const char *item_cstr = PyUnicode_AsUTF8(item_str);
+    if (item_cstr == NULL) {
+        lmsg("Thread %lu: Failed to convert item to UTF-8 string at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item_str);
+        Py_DECREF(item);
+        free(task_arg);
+        return -1;
+    }
+
+    lmsg("Thread %lu: Serializing item '%s' at index %zu\n", pthread_self(), item_cstr, task_arg->index);
+    Py_DECREF(item_str);
+
+
+    PicklerObject *pickler = _Pickler_New();
+    if (pickler == NULL) {
+        lmsg("Thread %lu: Failed to create PicklerObject for item at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        free(task_arg);
+        return -1;
+    }
+
+
+    PyObject *protocol_obj = PyLong_FromLong(protocol);
+    if (protocol_obj == NULL) {
+        lmsg("Thread %lu: Failed to create protocol object for item at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        Py_DECREF(pickler);
+        free(task_arg);
+        return -1;
+    }
+
+    if (_Pickler_SetProtocol(pickler, protocol_obj, 0) < 0) {
+        lmsg("Thread %lu: Failed to set protocol for PicklerObject at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        Py_DECREF(pickler);
+        Py_DECREF(protocol_obj);
+        free(task_arg);
+        return -1;
+    }
+    Py_DECREF(protocol_obj);  
+
+    
+    if (save(pickler, item, 0) < 0) {
+        lmsg("Thread %lu: Failed to serialize item at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        Py_DECREF(pickler);
+        free(task_arg);
+        return -1;
+    }
+
+
+    if (_Pickler_CommitFrame(pickler) < 0) {
+        lmsg("Thread %lu: Failed to commit frame for item at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        Py_DECREF(pickler);
+        free(task_arg);
+        return -1;
+    }
+
+
+    PyObject *data_obj = _Pickler_GetString(pickler);
+    if (data_obj == NULL) {
+        lmsg("Thread %lu: Failed to get serialized string for item at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        Py_DECREF(pickler);
+        free(task_arg);
+        return -1;
+    }
+
+    char *data = PyBytes_AsString(data_obj);
+    Py_ssize_t size = PyBytes_Size(data_obj);
+
+
+    *output = malloc(size);
+    if (*output == NULL) {
+        lmsg("Thread %lu: Memory allocation failed for serialized data at index %zu\n", pthread_self(), task_arg->index);
+        Py_DECREF(item);
+        Py_DECREF(pickler);
+        Py_DECREF(data_obj);
+        free(task_arg);
+        PyErr_NoMemory();
+        return -1;
+    }
+    memcpy(*output, data, size);
+    *output_size = size;
+
+    lmsg("Thread %lu: Successfully serialized item at index %zu\n", pthread_self(), task_arg->index);
+
+    Py_DECREF(item);
+    Py_DECREF(pickler);
+    Py_DECREF(data_obj);
+    free(task_arg);
+
+    return 0;
+}
+
+
+//change
+//modified batch_list_exact
+static int
+batch_list_exact(PicklerObject *self, PyObject *obj)
+{   
+    Py_ssize_t list_size = PyList_GET_SIZE(obj);
+    if (list_size < 0) {
+        lmsg("batch_list_exact: Failed to get list size\n");
+        return -1;
+    }
+    if (list_size == 1) {
+        PyObject *item = PyList_GET_ITEM(obj, 0);
+        Py_INCREF(item);
+        lmsg("batch_list_exact: Serializing single item at index 0\n");
+        int err = save(self, item, 0);
+        Py_DECREF(item);
+        if (err < 0) {
+            lmsg("batch_list_exact: Failed to serialize single item\n");
+            return -1;
+        }
+            
+        const char append_op = APPEND;
+        if (_Pickler_Write(self, &append_op, 1) < 0) {
+            lmsg("batch_list_exact: Failed to write APPEND opcode\n");
+            return -1;
+        }
+
+        lmsg("batch_list_exact: Successfully serialized single item\n");
+
+        return 0;
+    }
+
+
+    
+    int thread_count = 100;  
+
+    lmsg("batch_list_exact: Initializing thread pool with %d threads for %zd tasks\n", thread_count, list_size);
+    ThreadPool *pool = thread_pool_init(thread_count, list_size);
+    if (pool == NULL) {
+        lmsg("batch_list_exact: Failed to initialize thread pool\n");
+        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize thread pool");
+        return -1;
+    }
+
+
+    for (Py_ssize_t i = 0; i < list_size; i++) {
+        PyObject *item = PyList_GET_ITEM(obj, i);
+        Py_INCREF(item);
+
+        TaskArgument *task_arg = malloc(sizeof(TaskArgument));
+        if (task_arg == NULL) {
+            lmsg("batch_list_exact: Memory allocation failed for TaskArgument at index %zd\n", i);
+            PyErr_NoMemory();   
+            thread_pool_destroy(pool);
+            return -1;
+        }
+        task_arg->item = item;
+        task_arg->protocol = self->proto;
+        task_arg->index = i;
+       
+        if (thread_pool_add_pickle_task(pool, pickle_task_function, task_arg, i) != 0) {
+            lmsg("batch_list_exact: Failed to add task to thread pool at index %zd\n", i);
+            PyErr_SetString(PyExc_RuntimeError, "Failed to add task to thread pool");
+            Py_DECREF(item);
+            free(task_arg);
+            thread_pool_destroy(pool);
+            return -1;
+        }
+
+         lmsg("batch_list_exact: Dispatched task for item at index %zd\n", i);
+    }
+
+    lmsg("batch_list_exact: Waiting for all tasks to complete\n");
+    int wait_result =  0;
+    Py_BEGIN_ALLOW_THREADS  // Release the GIL
+    wait_result = thread_pool_wait_completion(pool);
+    Py_END_ALLOW_THREADS    // Re-acquire the GIL
+    
+    if (wait_result != 0) {
+        lmsg("batch_list_exact: Error while waiting for thread pool completion\n");
+        PyErr_SetString(PyExc_RuntimeError, "Error while waiting for thread pool completion");
+        thread_pool_destroy(pool);
+        return -1;
+    }
+
+
+    // Write MARK opcode
+    const char mark_op = MARK;
+     lmsg("batch_list_exact: Writing MARK opcode\n");
+    if (_Pickler_Write(self, &mark_op, 1) < 0) {
+         lmsg("batch_list_exact: Failed to write MARK opcode\n");
+        thread_pool_destroy(pool);
+        return -1;
+    }
+
+    for (Py_ssize_t i = 0; i < list_size; i++) {
+        size_t size;
+        char *data = thread_pool_get_individual_result(pool, i);
+        size = thread_pool_get_result_size(pool, i);
+
+        if (data == NULL) {
+            lmsg("batch_list_exact: Failed to get serialized data from task at index %zd\n", i);
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get serialized data from task");
+            thread_pool_destroy(pool);
+            return -1;
+        }
+
+        lmsg("batch_list_exact: Writing serialized data for item at index %zd (%zu bytes)\n", i, size);
+        if (_Pickler_Write(self, data, size) < 0) {
+            lmsg("batch_list_exact: Failed to write serialized data for item at index %zd\n", i);
+            free(data);
+            thread_pool_destroy(pool);
+            return -1;
+        }
+        free(data);
+    }
+
+    const char appends_op = APPENDS;
+    lmsg("batch_list_exact: Writing APPENDS opcode\n");
+    if (_Pickler_Write(self, &appends_op, 1) < 0) {
+        lmsg("batch_list_exact: Failed to write APPENDS opcode\n");
+        thread_pool_destroy(pool);
+        return -1;
+    }
+
+    lmsg("batch_list_exact: Destroying thread pool\n");
+    thread_pool_destroy(pool);
+    lmsg("batch_list_exact: Successfully serialized list of size %zd\n", list_size);
+
+    return 0;
+}
+
+
+
+
+// change
+//batch_list function...but we didnt use this because our examples dont use subtypes of lists
+//like deques etc.
 static int
 batch_list(PicklerObject *self, PyObject *iter)
 {
-    PyObject *obj = NULL;
-    PyObject *firstitem = NULL;
-    int i, n;
-
-    const char mark_op = MARK;
-    const char append_op = APPEND;
-    const char appends_op = APPENDS;
-
-    assert(iter != NULL);
-
-    /* XXX: I think this function could be made faster by avoiding the
-       iterator interface and fetching objects directly from list using
-       PyList_GET_ITEM.
-    */
-
-    if (self->proto == 0) {
-        /* APPENDS isn't available; do one at a time. */
-        for (;;) {
-            obj = PyIter_Next(iter);
-            if (obj == NULL) {
-                if (PyErr_Occurred())
-                    return -1;
-                break;
-            }
-            i = save(self, obj, 0);
-            Py_DECREF(obj);
-            if (i < 0)
-                return -1;
-            if (_Pickler_Write(self, &append_op, 1) < 0)
-                return -1;
-        }
-        return 0;
+    printf("modified batch_list was called\n");
+   
+    Py_ssize_t list_size = PyList_Size(iter);
+    if (list_size < 0) {
+        return -1;
     }
 
-    /* proto > 0:  write in batches of BATCHSIZE. */
-    do {
-        /* Get first item */
-        firstitem = PyIter_Next(iter);
-        if (firstitem == NULL) {
-            if (PyErr_Occurred())
-                goto error;
+   
+    int thread_count = 4;  
+    ThreadPool *pool = thread_pool_init(thread_count, list_size);
+    if (pool == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize thread pool");
+        return -1;
+    }
 
-            /* nothing more to add */
-            break;
+
+    for (Py_ssize_t i = 0; i < list_size; i++) {
+        PyObject *item = PyList_GetItem(iter, i);
+        if (item == NULL) {
+            thread_pool_destroy(pool);
+            return -1;
         }
-
-        /* Try to get a second item */
-        obj = PyIter_Next(iter);
-        if (obj == NULL) {
-            if (PyErr_Occurred())
-                goto error;
-
-            /* Only one item to write */
-            if (save(self, firstitem, 0) < 0)
-                goto error;
-            if (_Pickler_Write(self, &append_op, 1) < 0)
-                goto error;
-            Py_CLEAR(firstitem);
-            break;
-        }
-
-        /* More than one item to write */
-
-        /* Pump out MARK, items, APPENDS. */
-        if (_Pickler_Write(self, &mark_op, 1) < 0)
-            goto error;
-
-        if (save(self, firstitem, 0) < 0)
-            goto error;
-        Py_CLEAR(firstitem);
-        n = 1;
-
-        /* Fetch and save up to BATCHSIZE items */
-        while (obj) {
-            if (save(self, obj, 0) < 0)
-                goto error;
-            Py_CLEAR(obj);
-            n += 1;
-
-            if (n == BATCHSIZE)
-                break;
-
-            obj = PyIter_Next(iter);
-            if (obj == NULL) {
-                if (PyErr_Occurred())
-                    goto error;
-                break;
-            }
-        }
-
-        if (_Pickler_Write(self, &appends_op, 1) < 0)
-            goto error;
-
-    } while (n == BATCHSIZE);
-    return 0;
-
-  error:
-    Py_XDECREF(firstitem);
-    Py_XDECREF(obj);
-    return -1;
-}
-
-/* This is a variant of batch_list() above, specialized for lists (with no
- * support for list subclasses). Like batch_list(), we batch up chunks of
- *     MARK item item ... item APPENDS
- * opcode sequences.  Calling code should have arranged to first create an
- * empty list, or list-like object, for the APPENDS to operate on.
- * Returns 0 on success, -1 on error.
- *
- * This version is considerably faster than batch_list(), if less general.
- *
- * Note that this only works for protocols > 0.
- */
-static int
-batch_list_exact(PicklerObject *self, PyObject *obj)
-{
-    PyObject *item = NULL;
-    Py_ssize_t this_batch, total;
-
-    const char append_op = APPEND;
-    const char appends_op = APPENDS;
-    const char mark_op = MARK;
-
-    assert(obj != NULL);
-    assert(self->proto > 0);
-    assert(PyList_CheckExact(obj));
-
-    if (PyList_GET_SIZE(obj) == 1) {
-        item = PyList_GET_ITEM(obj, 0);
         Py_INCREF(item);
-        int err = save(self, item, 0);
-        Py_DECREF(item);
-        if (err < 0)
+
+       
+        TaskArgument *task_arg = malloc(sizeof(TaskArgument));
+        if (task_arg == NULL) {
+            PyErr_NoMemory();
+            Py_DECREF(item);
+            thread_pool_destroy(pool);
             return -1;
-        if (_Pickler_Write(self, &append_op, 1) < 0)
+        }
+        task_arg->item = item;
+        task_arg->protocol = self->proto;
+
+        
+        if (thread_pool_add_pickle_task(pool, pickle_task_function, task_arg, i) != 0) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to add task to thread pool");
+            Py_DECREF(item);
+            free(task_arg);
+            thread_pool_destroy(pool);
             return -1;
-        return 0;
+        }
     }
 
-    /* Write in batches of BATCHSIZE. */
-    total = 0;
-    do {
-        this_batch = 0;
-        if (_Pickler_Write(self, &mark_op, 1) < 0)
-            return -1;
-        while (total < PyList_GET_SIZE(obj)) {
-            item = PyList_GET_ITEM(obj, total);
-            Py_INCREF(item);
-            int err = save(self, item, 0);
-            Py_DECREF(item);
-            if (err < 0)
-                return -1;
-            total++;
-            if (++this_batch == BATCHSIZE)
-                break;
-        }
-        if (_Pickler_Write(self, &appends_op, 1) < 0)
-            return -1;
 
-    } while (total < PyList_GET_SIZE(obj));
+    if (thread_pool_wait_completion(pool) != 0) {
+        PyErr_SetString(PyExc_RuntimeError, "Error while waiting for thread pool completion");
+        thread_pool_destroy(pool);
+        return -1;
+    }
+
+    const char mark_op = MARK;
+    if (_Pickler_Write(self, &mark_op, 1) < 0) {
+        thread_pool_destroy(pool);
+        return -1;
+    }
+
+
+    for (Py_ssize_t i = 0; i < list_size; i++) {
+        char *data = thread_pool_get_individual_result(pool, i);
+        size_t size = thread_pool_get_result_size(pool, i);
+
+        if (data == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get serialized data from task");
+            thread_pool_destroy(pool);
+            return -1;
+        }
+
+        if (_Pickler_Write(self, data, size) < 0) {
+            free(data);
+            thread_pool_destroy(pool);
+            return -1;
+        }
+        free(data);
+    }
+
+   
+    const char appends_op = APPENDS;
+    if (_Pickler_Write(self, &appends_op, 1) < 0) {
+        thread_pool_destroy(pool);
+        return -1;
+    }
+
+
+    thread_pool_destroy(pool);
 
     return 0;
 }
+
 
 static int
 save_list(PicklerObject *self, PyObject *obj)
@@ -3129,6 +3369,7 @@ save_list(PicklerObject *self, PyObject *obj)
 
     return status;
 }
+
 
 /* iter is an iterator giving (key, value) pairs, and we batch up chunks of
  *     MARK key value ... key value SETITEMS
@@ -4667,6 +4908,8 @@ static struct PyMethodDef Pickler_methods[] = {
 static void
 Pickler_dealloc(PicklerObject *self)
 {
+    // pthread_mutex_destroy(&self->buffer_lock);
+
     PyObject_GC_UnTrack(self);
 
     Py_XDECREF(self->output_buffer);
@@ -4678,6 +4921,8 @@ Pickler_dealloc(PicklerObject *self)
     Py_XDECREF(self->buffer_callback);
 
     PyMemoTable_Del(self->memo);
+
+
 
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -7791,7 +8036,6 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
                    int fix_imports, PyObject *buffer_callback)
 /*[clinic end generated code: output=fbab0093a5580fdf input=e543272436c6f987]*/
 {
-    printf("inside C!!!\n");
     PyObject *result;
     PicklerObject *pickler = _Pickler_New();
 
