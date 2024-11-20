@@ -4296,6 +4296,8 @@ save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
 static int
 save(PicklerObject *self, PyObject *obj, int pers_save)
 {
+    // printf("\nin save\n");
+    // PyObject_Print(obj, stdout, 0);
     PyTypeObject *type;
     PyObject *reduce_func = NULL;
     PyObject *reduce_value = NULL;
@@ -7847,13 +7849,13 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
 /*[clinic end generated code: output=fbab0093a5580fdf input=e543272436c6f987]*/
 {
     printf("inside C fastpickle!!!\n");
-    PyObject *result;
-    // PyMemoTable *common_memo = PyMemoTable_New();
-    // if (common_memo == NULL) {
-    //     return PyErr_NoMemory();
-    // }
+    PyMemoTable *common_memo = PyMemoTable_New();
+    if (common_memo == NULL) {
+        return PyErr_NoMemory();
+    }
     // PicklerObject *pickler = _Pickler_New();
     
+    PyObject *result;
     PyObject *pickling_order;
     
     // Create the pickling_order list with the values [3, 2, 1]
@@ -7892,14 +7894,13 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
         if (pickler == NULL)
             return NULL;
         
-        // Replace pickler->memo with common_memo
-        // PyMemoTable_Clear(pickler->memo);  // Free the existing memo in the pickler
-        // PyMem_Free(pickler->memo);
+        //Replace pickler->memo with common_memo
+        PyMemoTable *old_memo = pickler->memo;
+        // Py_INCREF(common_memo);
         // Assign the shared memo
-        // pickler->memo = common_memo;
+        pickler->memo = common_memo;
         // printf("memo size : %zd", PyMemoTable_Size(pickler->memo));
         // printf("common memo size : %zd", PyMemoTable_Size(common_memo));
-        // print_memo_table(pickler->memo);
     
         if (_Pickler_SetProtocol(pickler, protocol, fix_imports) < 0)
             goto error;
@@ -7909,8 +7910,11 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
 
         PyObject *order_index = PyList_GetItem(pickling_order, i);  // Borrowed reference
         Py_ssize_t index = PyLong_AsSsize_t(order_index);
+        Py_INCREF(order_index);
         
         PyObject *element = PyList_GetItem(obj, index);  // Borrowed reference
+        Py_INCREF(element);
+        
         if (element == NULL) {
             PyErr_SetString(PyExc_RuntimeError, "Failed to get element from obj");
             goto error;
@@ -7922,19 +7926,33 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
         if (dump(pickler, element) < 0)
             goto error;
 
+        Py_DECREF(order_index);
+        Py_DECREF(element);
+        
         result = _Pickler_GetString(pickler);
-
+        printf("\npickler output_len: %zd", pickler->output_len);
+        printf("\noutput_len: %zd", PyBytes_GET_SIZE(result));
+        // hacky way
+        if(pickler->output_len <= 12)
+        {
+            parent_list_len += pickler->output_len - 3;
+        }
+        else
+        {
+            parent_list_len += pickler->output_len - 12;
+        }
+        // printf("\nresult[2]: %x", result[2]);
         // Skip the protocol header (\x80\x04\x95...) and STOP (.)
-        parent_list_len += PyBytes_GET_SIZE(result) - 12;
+        
 
         // Store the result in the results array
         results[i] = result;
-
+        pickler->memo = old_memo;
         Py_DECREF(pickler);
     }
     
     // To do : make the pickler objects share one memo table
-    parent_list_len += 5;
+    parent_list_len += 5; // not including header and STOP
     printf("\nparent list len %zd", parent_list_len);
     // After the loop, results array contains serialized strings from each PicklerObject
     printf("\nSuccessfully created and stored results for %zd objects.\n", pickling_order_len);
@@ -7945,51 +7963,78 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
     }
 
     // Buffer for storing the parent bytecode
-    PyObject *parent_bytecode = PyBytes_FromStringAndSize(NULL, parent_list_len);
-    if (parent_bytecode == NULL) {
-        PyErr_SetString(PyExc_MemoryError, "Failed to allocate memory for parent bytecode");
-        goto error;
+    char *parent = (char *)PyMem_Malloc(parent_list_len);
+    if (parent == NULL) {
+        PyErr_NoMemory();
+        return NULL;
     }
-    Py_ssize_t p = 0;
+    // Py_ssize_t p = 0;
+
     // Loop through each result and concatenate relevant portions
+    // for (Py_ssize_t i = 0; i < pickling_order_len; i++) {
+    //     // PyObject_Print(results[i], stdout, 0);
+    //     // print_pybytes(results[i]);
+    //     char *result_data = PyBytes_AS_STRING(results[i]);
+    //     Py_ssize_t result_size = PyBytes_GET_SIZE(results[i]);
+    //     // printf("Result data : %s\n", result_data);
+    //     // printf("Result size : %zd\n", result_size);
+    //     for (int j = 12; j < result_size; j++) {
+    //         // printf("%x ", (unsigned char)result_data[j]); // this will print the hex
+    //         // // will need to compare with hex values!
+    //         // unsigned char byte = (unsigned char)result_data[j];
+    //         // printf("%x ", byte); // Print the byte in hexadecimal
+
+    //         // // if (byte == 0x94) {
+    //         // if (result_data[j] == MEMOIZE) {
+    //         //     printf("hi "); // Print "hi" when the byte is 0x94
+    //         // }
+    //         parent[parent_index++] = result_data[j];
+    //     }
+    // }
+    parent[0] = EMPTY_LIST;
+    parent[1] = MEMOIZE;
+    parent[2] = MARK;
+    Py_ssize_t parent_index = 3;  
     for (Py_ssize_t i = 0; i < pickling_order_len; i++) {
-        
-        
-        PyObject_Print(results[i], stdout, 0);
-        // print_pybytes(results[i]);
         char *result_data = PyBytes_AS_STRING(results[i]);
         Py_ssize_t result_size = PyBytes_GET_SIZE(results[i]);
-        // printf("Result data : %s\n", result_data);
-        // printf("Result size : %zd\n", result_size);
-        for (int j = 12; j < result_size; j++) {
-             printf("%x ", (unsigned char)result_data[j]); // this will print the hex
-            // will need to compare with hex values!
-
-            //  printf("%c\n", (unsigned char) result_data[j]);  
-            unsigned char byte = (unsigned char)result_data[j];
-            printf("%x ", byte); // Print the byte in hexadecimal
-
-            if (byte == 0x94) {
-                printf("hi "); // Print "hi" when the byte is 0x94
+        if (result_data[2] == FRAME) {
+            // only then will the frame opcode and the length will be added to the buffer
+            for (int j = 11; j < result_size-1; j++) 
+            {
+                parent[parent_index++] = result_data[j];
             }
-
-            
-            // printf("0x%hhX\n", result_data[j] & 0xff);  
-              
         }
+        else 
+        {
+            for (int j = 2; j < result_size-1; j++) 
+            {
+                parent[parent_index++] = result_data[j];
+            }
+        }
+        
     }
+    parent[parent_index++] = APPENDS;
+    parent[parent_index++] = STOP;
+
+    PyObject *parent_pybytes = PyBytes_FromStringAndSize(parent, parent_list_len);
+
 
     // // DEBUG: Print the parent bytecode
-    // printf("Parent Bytecode: ");
-    // PyObject_Print(parent_bytecode, stdout, 0);
-    // printf("\n");
+    printf("\nParent Bytecode: ");
+    PyObject_Print(parent_pybytes, stdout, 0);
+    printf("\n");
 
     // Clean up the results array
     for (Py_ssize_t i = 0; i < pickling_order_len; i++) {
         Py_DECREF(results[i]);
     }
     PyMem_Free(results);
-    return Py_None;
+    PyMemoTable_Del(common_memo);
+    PyMem_Free(common_memo);
+    PyMem_Free(parent);
+    // return Py_None;
+    return parent_pybytes;
 
     // Error cleanup block
     error:
@@ -7997,7 +8042,8 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
         Py_DECREF(results[j]);  // Safely decref NULL pointers
     }
     PyMem_Free(results);
-    // Py_XDECREF(common_memo);
+    PyMemoTable_Del(common_memo);
+    PyMem_Free(common_memo);
     // Py_DECREF(pickler);
     return NULL;
 
