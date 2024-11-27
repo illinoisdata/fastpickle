@@ -37,6 +37,7 @@ enum {
     HIGHEST_PROTOCOL = 5,
     DEFAULT_PROTOCOL = 4
 };
+pthread_mutex_t memo_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #ifdef MS_WINDOWS
 // These are already typedefs from windows.h, pulled in via pycore_runtime.h.
@@ -903,8 +904,10 @@ PyMemoTable_Get(PyMemoTable *self, PyObject *key)
 {
     PyMemoEntry *entry = _PyMemoTable_Lookup(self, key);
     if (entry->me_key == NULL)
+    {
         return NULL;
-    return &entry->me_value;
+    }
+    return &entry->me_value;   
 }
 
 /* Returns -1 on failure, 0 on success. */
@@ -1735,11 +1738,13 @@ _Unpickler_SetBuffers(UnpicklerObject *self, PyObject *buffers)
 static int
 memo_get(PicklerObject *self, PyObject *key)
 {
+    
     Py_ssize_t *value;
     char pdata[30];
     Py_ssize_t len;
-
+    pthread_mutex_lock(&memo_lock);
     value = PyMemoTable_Get(self->memo, key);
+    pthread_mutex_unlock(&memo_lock);
     if (value == NULL)  {
         PyErr_SetObject(PyExc_KeyError, key);
         return -1;
@@ -2418,10 +2423,12 @@ _save_bytes_data(PicklerObject *self, PyObject *obj, const char *data,
     if (_Pickler_write_bytes(self, header, len, data, size, obj) < 0) {
         return -1;
     }
-
+    pthread_mutex_lock(&memo_lock);
     if (memo_put(self, obj) < 0) {
+        pthread_mutex_unlock(&memo_lock);
         return -1;
     }
+    pthread_mutex_unlock(&memo_lock);
 
     return 0;
 }
@@ -2496,9 +2503,12 @@ _save_bytearray_data(PicklerObject *self, PyObject *obj, const char *data,
         return -1;
     }
 
+    pthread_mutex_lock(&memo_lock);  
     if (memo_put(self, obj) < 0) {
+        pthread_mutex_unlock(&memo_lock);
         return -1;
     }
+    pthread_mutex_unlock(&memo_lock);
 
     return 0;
 }
@@ -2763,8 +2773,13 @@ save_unicode(PicklerObject *self, PyObject *obj)
         if (_Pickler_Write(self, "\n", 1) < 0)
             return -1;
     }
-    if (memo_put(self, obj) < 0)
+
+    pthread_mutex_lock(&memo_lock);
+    if (memo_put(self, obj) < 0){
+        pthread_mutex_unlock(&memo_lock);
         return -1;
+    }
+    pthread_mutex_unlock(&memo_lock);
 
     return 0;
 }
@@ -2835,9 +2850,10 @@ save_tuple(PicklerObject *self, PyObject *obj)
         /* Use TUPLE{1,2,3} opcodes. */
         if (store_tuple_elements(self, obj, len) < 0)
             return -1;
-
+        pthread_mutex_lock(&memo_lock);
         if (PyMemoTable_Get(self->memo, obj)) {
             /* pop the len elements */
+            pthread_mutex_unlock(&memo_lock);
             for (i = 0; i < len; i++)
                 if (_Pickler_Write(self, &pop_op, 1) < 0)
                     return -1;
@@ -2848,8 +2864,12 @@ save_tuple(PicklerObject *self, PyObject *obj)
             return 0;
         }
         else { /* Not recursive. */
+            pthread_mutex_unlock(&memo_lock);
+            // should unlock after writing into the memo?
             if (_Pickler_Write(self, len2opcode + len, 1) < 0)
+            {
                 return -1;
+            }
         }
         goto memoize;
     }
@@ -2863,8 +2883,10 @@ save_tuple(PicklerObject *self, PyObject *obj)
     if (store_tuple_elements(self, obj, len) < 0)
         return -1;
 
+    pthread_mutex_lock(&memo_lock);
     if (PyMemoTable_Get(self->memo, obj)) {
         /* pop the stack stuff we pushed */
+        pthread_mutex_unlock(&memo_lock);
         if (self->bin) {
             if (_Pickler_Write(self, &pop_mark_op, 1) < 0)
                 return -1;
@@ -2873,6 +2895,7 @@ save_tuple(PicklerObject *self, PyObject *obj)
             /* Note that we pop one more than len, to remove
              * the MARK too.
              */
+            pthread_mutex_unlock(&memo_lock);
             for (i = 0; i <= len; i++)
                 if (_Pickler_Write(self, &pop_op, 1) < 0)
                     return -1;
@@ -2884,13 +2907,19 @@ save_tuple(PicklerObject *self, PyObject *obj)
         return 0;
     }
     else { /* Not recursive. */
+        pthread_mutex_unlock(&memo_lock);
         if (_Pickler_Write(self, &tuple_op, 1) < 0)
             return -1;
     }
 
   memoize:
+    pthread_mutex_lock(&memo_lock);
     if (memo_put(self, obj) < 0)
+    {
+        pthread_mutex_unlock(&memo_lock);
         return -1;
+    }
+    pthread_mutex_unlock(&memo_lock);
 
     return 0;
 }
@@ -3095,9 +3124,13 @@ save_list(PicklerObject *self, PyObject *obj)
     /* Get list length, and bow out early if empty. */
     if ((len = PyList_Size(obj)) < 0)
         goto error;
-
+    pthread_mutex_lock(&memo_lock);
     if (memo_put(self, obj) < 0)
+    {
+        pthread_mutex_unlock(&memo_lock);
         goto error;
+    }
+    pthread_mutex_unlock(&memo_lock);
 
     if (len != 0) {
         /* Materialize the list elements. */
@@ -3368,9 +3401,13 @@ save_dict(PicklerObject *self, PyObject *obj)
 
     if (_Pickler_Write(self, header, len) < 0)
         goto error;
-
-    if (memo_put(self, obj) < 0)
+    
+    pthread_mutex_lock(&memo_lock);
+    if (memo_put(self, obj) < 0){
+        pthread_mutex_unlock(&memo_lock);
         goto error;
+    }
+    pthread_mutex_unlock(&memo_lock);
 
     if (PyDict_GET_SIZE(obj)) {
         /* Save the dict items. */
@@ -3445,8 +3482,14 @@ save_set(PicklerObject *self, PyObject *obj)
     if (_Pickler_Write(self, &empty_set_op, 1) < 0)
         return -1;
 
+    pthread_mutex_lock(&memo_lock);
     if (memo_put(self, obj) < 0)
+    {
+        pthread_mutex_unlock(&memo_lock);
         return -1;
+    }
+    pthread_mutex_unlock(&memo_lock);
+        
 
     set_size = PySet_GET_SIZE(obj);
     if (set_size == 0)
@@ -3541,7 +3584,9 @@ save_frozenset(PicklerObject *self, PyObject *obj)
     /* If the object is already in the memo, this means it is
        recursive. In this case, throw away everything we put on the
        stack, and fetch the object back from the memo. */
+    pthread_mutex_lock(&memo_lock);
     if (PyMemoTable_Get(self->memo, obj)) {
+        pthread_mutex_unlock(&memo_lock);
         const char pop_mark_op = POP_MARK;
 
         if (_Pickler_Write(self, &pop_mark_op, 1) < 0)
@@ -3550,11 +3595,18 @@ save_frozenset(PicklerObject *self, PyObject *obj)
             return -1;
         return 0;
     }
+    pthread_mutex_unlock(&memo_lock);
+    
 
     if (_Pickler_Write(self, &frozenset_op, 1) < 0)
         return -1;
+    pthread_mutex_lock(&memo_lock);
     if (memo_put(self, obj) < 0)
+    {
+        pthread_mutex_unlock(&memo_lock);
         return -1;
+    }
+    pthread_mutex_unlock(&memo_lock);
 
     return 0;
 }
@@ -3860,8 +3912,13 @@ save_global(PicklerObject *self, PyObject *obj, PyObject *name)
                 goto error;
         }
         /* Memoize the object. */
+        pthread_mutex_lock(&memo_lock);
         if (memo_put(self, obj) < 0)
+        {
+            pthread_mutex_unlock(&memo_lock);
             goto error;
+        }
+        pthread_mutex_unlock(&memo_lock);
     }
 
     if (0) {
@@ -4244,7 +4301,9 @@ save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
         /* If the object is already in the memo, this means it is
            recursive. In this case, throw away everything we put on the
            stack, and fetch the object back from the memo. */
+        pthread_mutex_lock(&memo_lock);
         if (PyMemoTable_Get(self->memo, obj)) {
+            pthread_mutex_unlock(&memo_lock);
             const char pop_op = POP;
 
             if (_Pickler_Write(self, &pop_op, 1) < 0)
@@ -4255,7 +4314,11 @@ save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
             return 0;
         }
         else if (memo_put(self, obj) < 0)
-            return -1;
+            {
+                pthread_mutex_unlock(&memo_lock);
+                return -1;
+            }
+        pthread_mutex_unlock(&memo_lock);
     }
 
     if (listitems && batch_list(self, listitems) < 0)
@@ -4344,9 +4407,14 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
     /* Check the memo to see if it has the object. If so, generate
        a GET (or BINGET) opcode, instead of pickling the object
        once again. */
+    pthread_mutex_lock(&memo_lock);
     if (PyMemoTable_Get(self->memo, obj)) {
+        pthread_mutex_unlock(&memo_lock);
+        // once an obj is in the memo, it won't be updated
         return memo_get(self, obj);
     }
+    pthread_mutex_unlock(&memo_lock);
+    // if it returns in the previous block, then mutex will not be unlocked
 
     if (type == &PyBytes_Type) {
         return save_bytes(self, obj);
@@ -8021,7 +8089,7 @@ into *file* as part of the pickle stream.  It is an error if
 
 
 typedef struct {
-    // PyMemoTable *common_memo;
+    PyMemoTable *common_memo;
     PyObject *obj;
     PyObject *protocol;
     int fix_imports;
@@ -8040,8 +8108,11 @@ void *process_element(void *arg) {
     }
 
         // Replace pickler->memo with common_memo
-        // PyMemoTable *old_memo = pickler->memo;
-        // pickler->memo = data->common_memo;
+        PyMemoTable *old_memo = pickler->memo;
+        pthread_mutex_lock(&memo_lock);
+        pickler->memo = data->common_memo;
+        pthread_mutex_unlock(&memo_lock);
+
 
         if (_Pickler_SetProtocol(pickler, data->protocol, data->fix_imports) < 0)
             goto error;
@@ -8049,22 +8120,22 @@ void *process_element(void *arg) {
         if (_Pickler_SetBufferCallback(pickler, data->buffer_callback) < 0)
             goto error;
 
-        printf("\nhello");
-        PyObject_Print(data->obj, stdout, 0);
-        printf("\n");
+        // printf("\nhello");
+        // PyObject_Print(data->obj, stdout, 0);
+        // printf("\n");
 
         if (dump(pickler, data->obj) < 0)
             goto error;
 
         PyObject *result = _Pickler_GetString(pickler);
 
-        printf("\npickler output_len: %zd", pickler->output_len);
-        printf("\noutput_len: %zd", PyBytes_GET_SIZE(result));
+        // printf("\npickler output_len: %zd", pickler->output_len);
+        // printf("\noutput_len: %zd", PyBytes_GET_SIZE(result));
 
         // Store the result in the results array
         data->result = result;
 
-        // pickler->memo = old_memo;
+        pickler->memo = old_memo;
         Py_DECREF(pickler);
         
 
@@ -8085,9 +8156,15 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
     const int NUM_THREADS = 3;
     pthread_t threads[NUM_THREADS];
     ThreadData thread_data[NUM_THREADS];
-
+    PyMemoTable *common_memo = PyMemoTable_New();
+    if (common_memo == NULL) {
+        return PyErr_NoMemory();
+    }
+    // Todo : put lock on common memo
+    // todo : making get and put atomic
     for (int t = 0; t < NUM_THREADS; t++) {
-        // thread_data[t].common_memo = common_memo;
+        // do i need to put a lock here?
+        thread_data[t].common_memo = common_memo;
         
         thread_data[t].obj = PyList_GetItem(obj, t);
         // if (thread_data[t].obj == NULL) {
@@ -8123,9 +8200,9 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
         }
     }
     
+    pthread_mutex_destroy(&memo_lock);
 
-    // PyObject_Print(obj, stdout, 0);
-
+    
     return Py_None;
 }
 
