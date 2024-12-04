@@ -1,7 +1,12 @@
 import pickle
 import pickletools
-
 import fastpickle
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.sparse import csr_matrix
+import torch
 
 
 def test_with_no_shared_ref():
@@ -331,5 +336,92 @@ def test_mixed_nested_collections_complex_order():
     complex_dict = {"key1": complex_list, "key2": complex_list}
     l = [complex_list, complex_set, complex_tuple, complex_dict]
     pickling_order = [1, 0, 2, 3]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_numpy_array():
+    array1 = np.array([[1, 2], [3, 4]])
+    array2 = np.array([[5, 6], [7, 8]])
+    l = [array1, array2]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_pandas_dataframe():
+    df1 = pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})
+    df2 = pd.DataFrame({"col3": [5, 6], "col4": [7, 8]})
+    l = [df1, df2]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_matplotlib_figure():
+    fig1, ax1 = plt.subplots()
+    ax1.plot([0, 1], [0, 1])
+    fig2, ax2 = plt.subplots()
+    ax2.plot([1, 0], [1, 0])
+    l = [fig1, fig2]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_scipy_sparse_matrix():
+    matrix1 = csr_matrix([[1, 0], [0, 1]])
+    matrix2 = csr_matrix([[0, 1], [1, 0]])
+    l = [matrix1, matrix2]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_torch_tensor():
+    tensor1 = torch.tensor([[1, 2], [3, 4]])
+    tensor2 = torch.tensor([[5, 6], [7, 8]])
+    l = [tensor1, tensor2]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_numpy_array_different_shapes():
+    array1 = np.array([[1, 2, 3], [4, 5, 6]])
+    array2 = np.array([[7, 8], [9, 10]])
+    l = [array1, array2]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_matplotlib_figure_subplots():
+    fig1, axs1 = plt.subplots(2, 1)
+    axs1[0].plot([0, 1], [0, 1])
+    axs1[1].plot([1, 0], [1, 0])
+    fig2, axs2 = plt.subplots(1, 2)
+    axs2[0].bar([1, 2, 3], [4, 5, 6])
+    axs2[1].scatter([7, 8], [9, 10])
+    l = [fig1, fig2]
+    pickling_order = [0, 1]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_scipy_sparse_matrix_non_diagonal():
+    matrix1 = csr_matrix([[0, 2], [3, 0]])
+    matrix2 = csr_matrix([[4, 0], [0, 5]]) 
+    l = [matrix1, matrix2]
+    pickling_order = [1, 0]
+    our_bytecode = fastpickle.pardumps(l, pickling_order)
+    assert our_bytecode == pickle.dumps(l)
+
+
+def test_pandas_dataframe_mixed_types():
+    df1 = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
+    df2 = pd.DataFrame({"col3": [1.5, 2.5], "col4": [True, False]})
+    l = [df1, df2]
+    pickling_order = [1, 0]
     our_bytecode = fastpickle.pardumps(l, pickling_order)
     assert our_bytecode == pickle.dumps(l)
