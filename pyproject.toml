@@ -35,3 +35,10 @@ dev = [
     "pytest",
     "pytest-cov",
 ]
+data-science = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "scipy",
+    "torch"
+]
