@@ -1,12 +1,13 @@
 import pickle
 import pickletools
-import fastpickle
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.sparse import csr_matrix
 import torch
+from scipy.sparse import csr_matrix
+
+import fastpickle
 
 
 def test_with_no_shared_ref():
@@ -411,7 +412,7 @@ def test_matplotlib_figure_subplots():
 
 def test_scipy_sparse_matrix_non_diagonal():
     matrix1 = csr_matrix([[0, 2], [3, 0]])
-    matrix2 = csr_matrix([[4, 0], [0, 5]]) 
+    matrix2 = csr_matrix([[4, 0], [0, 5]])
     l = [matrix1, matrix2]
     pickling_order = [1, 0]
     our_bytecode = fastpickle.pardumps(l, pickling_order)
