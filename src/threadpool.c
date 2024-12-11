@@ -30,6 +30,8 @@ void log_message(const char *format, ...) {
 
 
 ThreadPool* thread_pool_init(int thread_count, size_t initial_elements) {
+    printf("initialized a thread pool\n");
+    
     ThreadPool *pool;
     int i;
 
@@ -92,6 +94,7 @@ ThreadPool* thread_pool_init(int thread_count, size_t initial_elements) {
         pool->thread_count++;
         pool->started++;
     }
+    // printf("spawned %zu == %zu threads\n", pool->thread_count, pool->started);
 
     return pool;
 
@@ -224,15 +227,13 @@ void *thread_do_work(void *pool) {
         pthread_mutex_unlock(&(thread_pool->lock));
 
         if (task != NULL) {
-            // Acquire the GIL before calling any Python C API functions (because save, our main  function,  calls C API functions)
-            PyGILState_STATE gstate = PyGILState_Ensure();
+        
+            // PyGILState_STATE gstate = PyGILState_Ensure();
 
             log_message("Thread %lu: Starting task at index %zu\n", pthread_self(), task->index);
             int result = (*(task->function))(task->arg, &task->output, &task->output_size);
             log_message("Thread %lu: Finished task at index %zu with result %d\n", pthread_self(), task->index, result);
-
-            // Release the GIL after the Python API calls are done
-            PyGILState_Release(gstate);
+           
 
             // update the thread pool state
             pthread_mutex_lock(&(thread_pool->lock));

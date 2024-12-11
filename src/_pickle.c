@@ -33,8 +33,11 @@ PyDoc_STRVAR(pickle_module_doc,
 "Optimized C implementation for the Python pickle module.");
 
 int dbug_val = 1;
-
+int save_dbug_val = 1;
+int output_dbug_val = 1;
+// int final_output_debug = 0
 pthread_mutex_t llock = PTHREAD_MUTEX_INITIALIZER;
+
 
 void lmsg(const char *format, ...) {
     if (dbug_val == 0) {
@@ -47,6 +50,82 @@ void lmsg(const char *format, ...) {
         va_end(args);
     }
 }
+
+void output_lmsg(const char *format, ...) {
+    if (output_dbug_val == 0) {
+        va_list args;
+        va_start(args, format);
+        pthread_mutex_lock(&llock);
+        vprintf(format, args);
+        fflush(stdout);
+        pthread_mutex_unlock(&llock);
+        va_end(args);
+    }
+}
+
+// Function to print PyObject* as char bytes
+void print_output_buffer(PyObject *output_buffer) {
+    if (output_buffer == NULL) {
+        output_lmsg("output_buffer is NULL!\n");
+        return;
+    }
+
+    if (PyBytes_Check(output_buffer)) {
+        // Handle bytes object
+        char *buffer = PyBytes_AsString(output_buffer);
+        Py_ssize_t length = PyBytes_Size(output_buffer);
+
+        if (buffer != NULL) {
+            // Print as a string (may stop at first null byte)
+            output_lmsg("buffer as string: #%s#\n", buffer);
+
+            // Print as hexadecimal bytes to handle any data
+            output_lmsg("buffer bytes (hex): ");
+            for (Py_ssize_t i = 0; i < length; i++) {
+                output_lmsg("%02x ", (unsigned char)buffer[i]);
+            }
+            output_lmsg("\n");
+        } else {
+            output_lmsg("Failed to convert PyBytes to string.\n");
+        }
+    }
+    else if (PyByteArray_Check(output_buffer)) {
+        // Handle bytearray object
+        char *buffer = PyByteArray_AsString(output_buffer);
+        Py_ssize_t length = PyByteArray_Size(output_buffer);
+
+        if (buffer != NULL) {
+            // Print as a string (may stop at first null byte)
+            output_lmsg("buffer as string: #%s#\n", buffer);
+
+            // Print as hexadecimal bytes to handle any data
+            output_lmsg("buffer bytes (hex): ");
+            for (Py_ssize_t i = 0; i < length; i++) {
+                output_lmsg("%02x ", (unsigned char)buffer[i]);
+            }
+            output_lmsg("\n");
+        } else {
+            output_lmsg("Failed to convert PyByteArray to string.\n");
+        }
+    }
+    else {
+        output_lmsg("output_buffer is not a bytes or bytearray object.\n");
+    }
+}
+
+
+void save_lmsg(const char *format, ...) {
+    if (save_dbug_val == 0) {
+        va_list args;
+        va_start(args, format);
+        pthread_mutex_lock(&llock);
+        vprintf(format, args);
+        fflush(stdout);
+        pthread_mutex_unlock(&llock);
+        va_end(args);
+    }
+}
+
 
 
 /*[clinic input]
@@ -769,8 +848,14 @@ static PyTypeObject Unpickler_Type;
 
 static PyMemoTable *
 PyMemoTable_New(void)
-{
+{   
+
+    PyGILState_STATE gstate;
+
+    gstate = PyGILState_Ensure();
     PyMemoTable *memo = PyMem_Malloc(sizeof(PyMemoTable));
+    PyGILState_Release(gstate);
+
     if (memo == NULL) {
         PyErr_NoMemory();
         return NULL;
@@ -779,10 +864,15 @@ PyMemoTable_New(void)
     memo->mt_used = 0;
     memo->mt_allocated = MT_MINSIZE;
     memo->mt_mask = MT_MINSIZE - 1;
+    gstate = PyGILState_Ensure();
     memo->mt_table = PyMem_Malloc(MT_MINSIZE * sizeof(PyMemoEntry));
+    PyGILState_Release(gstate);
+
     if (memo->mt_table == NULL) {
+        PyGILState_Release(gstate);
         PyMem_Free(memo);
         PyErr_NoMemory();
+        PyGILState_Release(gstate);
         return NULL;
     }
     memset(memo->mt_table, 0, MT_MINSIZE * sizeof(PyMemoEntry));
@@ -795,6 +885,7 @@ PyMemoTable_Copy(PyMemoTable *self)
 {
     PyMemoTable *new = PyMemoTable_New();
     if (new == NULL)
+    
         return NULL;
 
     new->mt_used = self->mt_used;
@@ -932,6 +1023,7 @@ _PyMemoTable_ResizeTable(PyMemoTable *self, size_t min_size)
 static Py_ssize_t *
 PyMemoTable_Get(PyMemoTable *self, PyObject *key)
 {
+    // printf("called PyMemoTable_Get\n");
     PyMemoEntry *entry = _PyMemoTable_Lookup(self, key);
     if (entry->me_key == NULL)
         return NULL;
@@ -983,6 +1075,7 @@ PyMemoTable_Set(PyMemoTable *self, PyObject *key, Py_ssize_t value)
 static int
 _Pickler_ClearBuffer(PicklerObject *self)
 {
+    
     Py_XSETREF(self->output_buffer,
               PyBytes_FromStringAndSize(NULL, self->max_output_len));
     if (self->output_buffer == NULL)
@@ -1013,8 +1106,11 @@ _Pickler_CommitFrame(PicklerObject *self)
     size_t frame_len;
     char *qdata;
 
-    if (!self->framing || self->frame_start == -1)
+    if (!self->framing || self->frame_start == -1) {
+        lmsg("ERROR _Pickler_CommitFrame: (!self->framing || self->frame_start == -1\n");
         return 0;
+    }
+        
     frame_len = self->output_len - self->frame_start - FRAME_HEADER_SIZE;
     qdata = PyBytes_AS_STRING(self->output_buffer) + self->frame_start;
     if (frame_len >= FRAME_SIZE_MIN) {
@@ -1026,12 +1122,14 @@ _Pickler_CommitFrame(PicklerObject *self)
         self->output_len -= FRAME_HEADER_SIZE;
     }
     self->frame_start = -1;
+    lmsg("ATTNETION self->frame_start is set to -1!!!\n");
     return 0;
 }
 
 static PyObject *
 _Pickler_GetString(PicklerObject *self)
 {
+    PyGILState_STATE gstate;
     PyObject *output_buffer = self->output_buffer;
 
     assert(self->output_buffer != NULL);
@@ -1039,16 +1137,19 @@ _Pickler_GetString(PicklerObject *self)
     if (_Pickler_CommitFrame(self)) {
         return NULL;
     }
+    
     // printf("\033[31m_Pickler_GetString: CommitFrame successfull\033[0m\n");
 
     self->output_buffer = NULL;
     /* Resize down to exact size */
-    if (_PyBytes_Resize(&output_buffer, self->output_len) < 0) {
+
+    // gstate = PyGILState_Ensure();
+    if (_PyBytes_Resize(&output_buffer, self->output_len) < 0) { 
+        //  PyGILState_Release(gstate);
         return NULL;
     }
-
     // printf("\033[31m_Pickler_GetString: _PyBytes_Resize successfull, returning output buffer\033[0m\n");
-        
+    // PyGILState_Release(gstate);
     return output_buffer;
 }
 
@@ -1130,6 +1231,7 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
         /* Make place in buffer for the pickle chunk */
         if (self->output_len >= PY_SSIZE_T_MAX / 2 - n) {
             PyErr_NoMemory();
+            lmsg("_Pickler_Write: self->output_len >= PY_SSIZE_T_MAX / 2 - n\n");
             // pthread_mutex_unlock(&self->buffer_lock); // Unlock after accessing buffer
             return -1;
         }
@@ -1173,26 +1275,33 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
 
 static PicklerObject *
 _Pickler_New(void)
-{
+{   
+    
+    PyGILState_STATE gstate;
+    
     PyMemoTable *memo = PyMemoTable_New();
+    
+    
+   
     if (memo == NULL) {
         return NULL;
     }
-
     const Py_ssize_t max_output_len = WRITE_BUF_SIZE;
+    
+   
     PyObject *output_buffer = PyBytes_FromStringAndSize(NULL, max_output_len);
     if (output_buffer == NULL) {
         goto error;
     }
 
-    PicklerObject *self = PyObject_GC_New(PicklerObject, &Pickler_Type);
+    gstate = PyGILState_Ensure();
+    PicklerObject *self = PyObject_GC_New(PicklerObject, &Pickler_Type); //can't step into this implementation
+    PyGILState_Release(gstate);
+    
     if (self == NULL) {
         goto error;
     }
-
-    // self->buffer_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-
-
+    
     self->memo = memo;
     self->pers_func = NULL;
     self->pers_func_self = NULL;
@@ -1213,12 +1322,16 @@ _Pickler_New(void)
     self->fast_memo = NULL;
     self->buffer_callback = NULL;
 
-    PyObject_GC_Track(self);
+    gstate = PyGILState_Ensure();
+    PyObject_GC_Track(self); //can't step into this function
+    PyGILState_Release(gstate);
     return self;
 
 error:
+    gstate = PyGILState_Ensure();
     PyMem_Free(memo);
     Py_XDECREF(output_buffer);
+    PyGILState_Release(gstate);
     return NULL;
 }
 
@@ -1226,26 +1339,38 @@ static int
 _Pickler_SetProtocol(PicklerObject *self, PyObject *protocol, int fix_imports)
 {
     long proto;
+    // PyGILState_STATE gstate;
 
-    if (protocol == Py_None) {
-        proto = DEFAULT_PROTOCOL;
+    if (protocol == Py_None) {      //TODO
+        proto = DEFAULT_PROTOCOL; //we always are hitting this branch, need to figure out how to test GIL placement for the other branch
     }
     else {
-        proto = PyLong_AsLong(protocol);
+        // gstate = PyGILState_Ensure();
+        proto = PyLong_AsLong(protocol); //unsure if this causes seg fault
+        
         if (proto < 0) {
-            if (proto == -1 && PyErr_Occurred())
-                return -1;
+            if (proto == -1 && PyErr_Occurred()) { //caller must hold the gil for this
+                    // PyGILState_Release(gstate); 
+                    return -1;
+                }
+            // PyGILState_Release(gstate); 
             proto = HIGHEST_PROTOCOL;
+            
         }
         else if (proto > HIGHEST_PROTOCOL) {
             PyErr_Format(PyExc_ValueError, "pickle protocol must be <= %d",
                          HIGHEST_PROTOCOL);
+            // PyGILState_Release(gstate);
             return -1;
         }
+        //unsure if we reach here
+        //  PyGILState_Release(gstate); 
     }
+    
     self->proto = (int)proto;
     self->bin = proto > 0;
     self->fix_imports = fix_imports && proto < 3;
+
     return 0;
 }
 
@@ -2079,6 +2204,7 @@ whichmodule(PyObject *global, PyObject *dotted_path)
 static int
 fast_save_enter(PicklerObject *self, PyObject *obj)
 {
+    save_lmsg("fast save was called\n");
     /* if fast_nesting < 0, we're doing an error exit. */
     if (++self->fast_nesting >= FAST_NESTING_LIMIT) {
         PyObject *key = NULL;
@@ -2966,113 +3092,173 @@ typedef struct {
 
 int pickle_task_function(void *arg, char **output, size_t *output_size)
 {
+    PyGILState_STATE gstate; //define gstate here, use it later
     TaskArgument *task_arg = (TaskArgument *)arg;
     PyObject *item = task_arg->item;
     int protocol = task_arg->protocol;
 
-    PyObject *item_str = PyObject_Repr(item);
-    if (item_str == NULL) {
-        lmsg("Thread %lu: Failed to get string representation of item at index %zu\n", pthread_self(), task_arg->index);
-        Py_DECREF(item);
-        free(task_arg);
-        return -1;
-    }
 
-    const char *item_cstr = PyUnicode_AsUTF8(item_str);
-    if (item_cstr == NULL) {
-        lmsg("Thread %lu: Failed to convert item to UTF-8 string at index %zu\n", pthread_self(), task_arg->index);
-        Py_DECREF(item_str);
-        Py_DECREF(item);
-        free(task_arg);
-        return -1;
-    }
-
-    lmsg("Thread %lu: Serializing item '%s' at index %zu\n", pthread_self(), item_cstr, task_arg->index);
-    Py_DECREF(item_str);
-
+    // gstate = PyGILState_Ensure();
+    // if (item == NULL) {
+    //      lmsg("Thread %lu: Failed to convert item to UTF-8 string at index %zu\n",
+    //          pthread_self(), task_arg->index);
+    //     free(task_arg);
+    //     return -1;
+    // }
+    // lmsg("Thread %lu: attempting to get PyObject_Repr of object at index %zu\n",
+    //          pthread_self(), task_arg->index);
+    // PyObject *item_str = PyObject_Repr(item);
+    // if (item_str == NULL) {
+    //     lmsg("Thread %lu: Failed to get string representation of item at index %zu\n",
+    //          pthread_self(), task_arg->index);
+    //     Py_DECREF(item);
+    //     free(task_arg);   
+    //     return -1;
+    // }
+    // const char *item_cstr = PyUnicode_AsUTF8(item_str);
+    // if (item_cstr == NULL) {
+    //     lmsg("Thread %lu: Failed to convert item to UTF-8 string at index %zu\n",
+    //          pthread_self(), task_arg->index);
+    //     Py_DECREF(item_str);
+    //     Py_DECREF(item);
+    //     free(task_arg); 
+    //     return -1;
+    // }
+    // lmsg("Thread %lu: Serializing item '%s' at index %zu\n",
+    //      pthread_self(), item_cstr, task_arg->index);
+    // Py_DECREF(item_str);
+    // PyGILState_Release(gstate);
 
     PicklerObject *pickler = _Pickler_New();
     if (pickler == NULL) {
-        lmsg("Thread %lu: Failed to create PicklerObject for item at index %zu\n", pthread_self(), task_arg->index);
+        lmsg("Thread %lu: Failed to create PicklerObject for item at index %zu\n",
+             pthread_self(), task_arg->index);
+        gstate = PyGILState_Ensure();
         Py_DECREF(item);
+        PyGILState_Release(gstate);
         free(task_arg);
         return -1;
     }
-
 
     PyObject *protocol_obj = PyLong_FromLong(protocol);
+
     if (protocol_obj == NULL) {
-        lmsg("Thread %lu: Failed to create protocol object for item at index %zu\n", pthread_self(), task_arg->index);
+        lmsg("Thread %lu: Failed to create protocol object for item at index %zu\n",
+             pthread_self(), task_arg->index);
+        gstate = PyGILState_Ensure();
         Py_DECREF(item);
         Py_DECREF(pickler);
+        PyGILState_Release(gstate);
         free(task_arg);
         return -1;
     }
 
+
+
     if (_Pickler_SetProtocol(pickler, protocol_obj, 0) < 0) {
-        lmsg("Thread %lu: Failed to set protocol for PicklerObject at index %zu\n", pthread_self(), task_arg->index);
+       
+        lmsg("Thread %lu: Failed to set protocol for PicklerObject at index %zu\n",
+             pthread_self(), task_arg->index);
+        gstate = PyGILState_Ensure();
         Py_DECREF(item);
         Py_DECREF(pickler);
         Py_DECREF(protocol_obj);
+        PyGILState_Release(gstate);
+        free(task_arg);
+       
+        return -1;
+    }
+
+   
+    gstate = PyGILState_Ensure();
+    //  for some reason this doesn't cause segfault, but removing
+    // GIL placement at the bottom of this function (decref called on other objects) does
+   //maybe the count never hits 0
+    Py_DECREF(protocol_obj);
+    PyGILState_Release(gstate);
+
+    // gstate = PyGILState_Ensure();
+    if (save(pickler, item, 0) < 0) {
+        lmsg("Thread %lu: Failed to serialize item at index %zu\n",
+             pthread_self(), task_arg->index);
+        gstate = PyGILState_Ensure();
+        Py_DECREF(item);
+        Py_DECREF(pickler);
+        PyGILState_Release(gstate);
         free(task_arg);
         return -1;
     }
-    Py_DECREF(protocol_obj);  
+
+    // PyGILState_Release(gstate);
+    
 
     
-    if (save(pickler, item, 0) < 0) {
-        lmsg("Thread %lu: Failed to serialize item at index %zu\n", pthread_self(), task_arg->index);
-        Py_DECREF(item);
-        Py_DECREF(pickler);
-        free(task_arg);
-        return -1;
-    }
-
-
     if (_Pickler_CommitFrame(pickler) < 0) {
-        lmsg("Thread %lu: Failed to commit frame for item at index %zu\n", pthread_self(), task_arg->index);
+        lmsg("Thread %lu: Failed to commit frame for item at index %zu\n",
+             pthread_self(), task_arg->index);
+        gstate = PyGILState_Ensure();
         Py_DECREF(item);
         Py_DECREF(pickler);
+        PyGILState_Release(gstate);
         free(task_arg);
         return -1;
     }
 
 
     PyObject *data_obj = _Pickler_GetString(pickler);
+
+
     if (data_obj == NULL) {
-        lmsg("Thread %lu: Failed to get serialized string for item at index %zu\n", pthread_self(), task_arg->index);
+        lmsg("Thread %lu: Failed to get serialized string for item at index %zu\n",
+             pthread_self(), task_arg->index);
+        gstate = PyGILState_Ensure();
         Py_DECREF(item);
         Py_DECREF(pickler);
+        PyGILState_Release(gstate);
         free(task_arg);
+      
         return -1;
     }
 
+    
     char *data = PyBytes_AsString(data_obj);
     Py_ssize_t size = PyBytes_Size(data_obj);
 
 
     *output = malloc(size);
+   
+
     if (*output == NULL) {
-        lmsg("Thread %lu: Memory allocation failed for serialized data at index %zu\n", pthread_self(), task_arg->index);
+        lmsg("Thread %lu: Memory allocation failed for serialized data at index %zu\n",
+             pthread_self(), task_arg->index);
+        gstate = PyGILState_Ensure();
         Py_DECREF(item);
         Py_DECREF(pickler);
         Py_DECREF(data_obj);
+        PyGILState_Release(gstate);
         free(task_arg);
         PyErr_NoMemory();
+
         return -1;
     }
+
+   
     memcpy(*output, data, size);
+
+
     *output_size = size;
 
-    lmsg("Thread %lu: Successfully serialized item at index %zu\n", pthread_self(), task_arg->index);
-
+    lmsg("Thread %lu: Successfully serialized item at index %zu\n",
+         pthread_self(), task_arg->index);
+    gstate = PyGILState_Ensure();
     Py_DECREF(item);
     Py_DECREF(pickler);
     Py_DECREF(data_obj);
+    PyGILState_Release(gstate);
     free(task_arg);
-
     return 0;
 }
+
 
 
 //change
@@ -3080,11 +3266,20 @@ int pickle_task_function(void *arg, char **output, size_t *output_size)
 static int
 batch_list_exact(PicklerObject *self, PyObject *obj)
 {   
+
+    lmsg("batch_list_exact has been called\n");
+   
+    
     Py_ssize_t list_size = PyList_GET_SIZE(obj);
     if (list_size < 0) {
         lmsg("batch_list_exact: Failed to get list size\n");
         return -1;
     }
+
+
+    
+
+    
     if (list_size == 1) {
         PyObject *item = PyList_GET_ITEM(obj, 0);
         Py_INCREF(item);
@@ -3094,6 +3289,7 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
         if (err < 0) {
             lmsg("batch_list_exact: Failed to serialize single item\n");
             return -1;
+            
         }
             
         const char append_op = APPEND;
@@ -3103,23 +3299,22 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
         }
 
         lmsg("batch_list_exact: Successfully serialized single item\n");
-
         return 0;
     }
 
-
-    
-    int thread_count = 100;  
-
+    // batch_list_exact
+    ssize_t thread_count = 10;  
+    // printf("created a threadpool with %zu threads\n", thread_count);
     lmsg("batch_list_exact: Initializing thread pool with %d threads for %zd tasks\n", thread_count, list_size);
     ThreadPool *pool = thread_pool_init(thread_count, list_size);
     if (pool == NULL) {
         lmsg("batch_list_exact: Failed to initialize thread pool\n");
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize thread pool");
+        // PyGILState_Release(gstate);
         return -1;
     }
 
-
+    // gstate = PyGILState_Ensure();
     for (Py_ssize_t i = 0; i < list_size; i++) {
         PyObject *item = PyList_GET_ITEM(obj, i);
         Py_INCREF(item);
@@ -3129,6 +3324,7 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
             lmsg("batch_list_exact: Memory allocation failed for TaskArgument at index %zd\n", i);
             PyErr_NoMemory();   
             thread_pool_destroy(pool);
+            // PyGILState_Release(gstate);
             return -1;
         }
         task_arg->item = item;
@@ -3141,6 +3337,7 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
             Py_DECREF(item);
             free(task_arg);
             thread_pool_destroy(pool);
+            // PyGILState_Release(gstate);
             return -1;
         }
 
@@ -3149,14 +3346,15 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
 
     lmsg("batch_list_exact: Waiting for all tasks to complete\n");
     int wait_result =  0;
-    Py_BEGIN_ALLOW_THREADS  // Release the GIL
+    Py_BEGIN_ALLOW_THREADS  
     wait_result = thread_pool_wait_completion(pool);
-    Py_END_ALLOW_THREADS    // Re-acquire the GIL
+    Py_END_ALLOW_THREADS    
     
     if (wait_result != 0) {
         lmsg("batch_list_exact: Error while waiting for thread pool completion\n");
         PyErr_SetString(PyExc_RuntimeError, "Error while waiting for thread pool completion");
         thread_pool_destroy(pool);
+        // PyGILState_Release(gstate);
         return -1;
     }
 
@@ -3179,6 +3377,7 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
             lmsg("batch_list_exact: Failed to get serialized data from task at index %zd\n", i);
             PyErr_SetString(PyExc_RuntimeError, "Failed to get serialized data from task");
             thread_pool_destroy(pool);
+            // PyGILState_Release(gstate);
             return -1;
         }
 
@@ -3187,6 +3386,7 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
             lmsg("batch_list_exact: Failed to write serialized data for item at index %zd\n", i);
             free(data);
             thread_pool_destroy(pool);
+            // PyGILState_Release(gstate);
             return -1;
         }
         free(data);
@@ -3204,7 +3404,9 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
     thread_pool_destroy(pool);
     lmsg("batch_list_exact: Successfully serialized list of size %zd\n", list_size);
 
-    return 0;
+    
+    lmsg("releasing GIL and returning..\n");
+    return 0;   
 }
 
 
@@ -3223,8 +3425,8 @@ batch_list(PicklerObject *self, PyObject *iter)
         return -1;
     }
 
-   
-    int thread_count = 4;  
+//    this is the non-used batch_list (for list subtypes like queues etc dont touch this for now...)
+    int thread_count = 5;  
     ThreadPool *pool = thread_pool_init(thread_count, list_size);
     if (pool == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize thread pool");
@@ -3310,13 +3512,17 @@ batch_list(PicklerObject *self, PyObject *iter)
 static int
 save_list(PicklerObject *self, PyObject *obj)
 {
+    lmsg("save list was called\n");
+    PyGILState_STATE gstate; //define gstate here, use it later
+
     char header[3];
     Py_ssize_t len;
     int status = 0;
 
-    if (self->fast && !fast_save_enter(self, obj))
+    if (self->fast && !fast_save_enter(self, obj)) {
         goto error;
-
+    }
+        
     /* Create an empty list. */
     if (self->bin) {
         header[0] = EMPTY_LIST;
@@ -3328,45 +3534,70 @@ save_list(PicklerObject *self, PyObject *obj)
         len = 2;
     }
 
-    if (_Pickler_Write(self, header, len) < 0)
+    if (_Pickler_Write(self, header, len) < 0) {
         goto error;
-
+    }
+    
     /* Get list length, and bow out early if empty. */
-    if ((len = PyList_Size(obj)) < 0)
-        goto error;
+    if ((len = PyList_Size(obj)) < 0) {
+         goto error;
+    }
+       
 
-    if (memo_put(self, obj) < 0)
+   
+
+    if (memo_put(self, obj) < 0) {
         goto error;
+    }
+
 
     if (len != 0) {
         /* Materialize the list elements. */
         if (PyList_CheckExact(obj) && self->proto > 0) {
-            if (_Py_EnterRecursiveCall(" while pickling an object"))
+            gstate = PyGILState_Ensure();
+            if (_Py_EnterRecursiveCall(" while pickling an object")) {
+                PyGILState_Release(gstate);
                 goto error;
+            }
+            PyGILState_Release(gstate);
+            
+                
+            //apparently this is GIL safe...for now
             status = batch_list_exact(self, obj);
+            
+
+            gstate = PyGILState_Ensure();
             _Py_LeaveRecursiveCall();
-        } else {
+            PyGILState_Release(gstate);
+        } else { //for now we won't be hitting this since this is for instances that are subtypes of list like queue, stack
             PyObject *iter = PyObject_GetIter(obj);
             if (iter == NULL)
                 goto error;
-
+            gstate = PyGILState_Ensure();
             if (_Py_EnterRecursiveCall(" while pickling an object")) {
                 Py_DECREF(iter);
+                PyGILState_Release(gstate);
                 goto error;
             }
             status = batch_list(self, iter);
             _Py_LeaveRecursiveCall();
             Py_DECREF(iter);
+            PyGILState_Release(gstate);
+           
         }
     }
+
+    
     if (0) {
   error:
         status = -1;
     }
 
-    if (self->fast && !fast_save_leave(self, obj))
-        status = -1;
-
+    if (self->fast && !fast_save_leave(self, obj)) {
+           status = -1;
+    }
+     
+    lmsg("returning from save_list\n");
     return status;
 }
 
@@ -4533,17 +4764,26 @@ save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
     }
     return 0;
 }
-
+// save function
 static int
 save(PicklerObject *self, PyObject *obj, int pers_save)
 {
+
+    PyGILState_STATE gstate; //define gstate here, use it later
+
+   
+       
+   
     PyTypeObject *type;
     PyObject *reduce_func = NULL;
     PyObject *reduce_value = NULL;
     int status = 0;
 
-    if (_Pickler_OpcodeBoundary(self) < 0)
+    if (_Pickler_OpcodeBoundary(self) < 0) {
+        printf("pickler opcode boundary err\n");
         return -1;
+    }
+        
 
     /* The extra pers_save argument is necessary to avoid calling save_pers()
        on its returned object. */
@@ -4553,8 +4793,11 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
              0   if it did nothing successfully;
              1   if a persistent id was saved.
          */
-        if ((status = save_pers(self, obj)) != 0)
+        printf("calling save_pers\n");
+        if ((status = save_pers(self, obj)) != 0) {
             return status;
+        }
+            
     }
 
     type = Py_TYPE(obj);
@@ -4567,15 +4810,19 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
     /* Atom types; these aren't memoized, so don't check the memo. */
 
     if (obj == Py_None) {
+        // printf("calling save_none\n");
         return save_none(self, obj);
     }
     else if (obj == Py_False || obj == Py_True) {
+        // printf("calling save_bool\n");
         return save_bool(self, obj);
     }
     else if (type == &PyLong_Type) {
+        // printf("calling save_long\n");
         return save_long(self, obj);
     }
     else if (type == &PyFloat_Type) {
+        // printf("calling save_float\n");
         return save_float(self, obj);
     }
 
@@ -4583,47 +4830,63 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
        a GET (or BINGET) opcode, instead of pickling the object
        once again. */
     if (PyMemoTable_Get(self->memo, obj)) {
+        // printf("returning memo_get\n");
         return memo_get(self, obj);
     }
 
     if (type == &PyBytes_Type) {
+        //  printf("returning save_bytes\n");
         return save_bytes(self, obj);
     }
     else if (type == &PyUnicode_Type) {
+        // printf("returning save_unicode\n");
         return save_unicode(self, obj);
     }
 
     /* We're only calling _Py_EnterRecursiveCall here so that atomic
        types above are pickled faster. */
+    gstate = PyGILState_Ensure();
+    // save_lmsg("entering _Py_EnterRecursiveCall.....\n");
+        //_Py_EnterRecursiveCall "marks a point where a C-level recursive call is about to be performed"
     if (_Py_EnterRecursiveCall(" while pickling an object")) {
+        PyGILState_Release(gstate);
         return -1;
     }
+    PyGILState_Release(gstate);
 
     if (type == &PyDict_Type) {
+        // printf("save_dict was called\n");
         status = save_dict(self, obj);
         goto done;
     }
     else if (type == &PySet_Type) {
+        // printf("save_set was called\n");
         status = save_set(self, obj);
         goto done;
     }
     else if (type == &PyFrozenSet_Type) {
+        // printf("save_frozenset was called\n");
         status = save_frozenset(self, obj);
         goto done;
     }
     else if (type == &PyList_Type) {
+        
         status = save_list(self, obj);
+        save_lmsg("save_list was called with status: %d\n", status);
         goto done;
     }
     else if (type == &PyTuple_Type) {
+        // printf("save_tuple was called\n");
         status = save_tuple(self, obj);
         goto done;
     }
     else if (type == &PyByteArray_Type) {
+        // printf("save_bytearray was called\n");
         status = save_bytearray(self, obj);
         goto done;
     }
     else if (type == &PyPickleBuffer_Type) {
+        // printf("save_picklebuffer was called\n");
         status = save_picklebuffer(self, obj);
         goto done;
     }
@@ -4632,6 +4895,7 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
      * fallback to save_type or save_global, and then perhaps to the
      * regular reduction mechanism.
      */
+    // printf("reducer_override portion\n");
     if (self->reducer_override != NULL) {
         reduce_value = PyObject_CallOneArg(self->reducer_override, obj);
         if (reduce_value == NULL) {
@@ -4752,11 +5016,11 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
         status = -1;
     }
   done:
-
+    gstate = PyGILState_Ensure();
     _Py_LeaveRecursiveCall();
     Py_XDECREF(reduce_func);
-    Py_XDECREF(reduce_value);
-
+    PyGILState_Release(gstate);
+    lmsg("returning from save\n");
     return status;
 }
 
@@ -4769,6 +5033,7 @@ dump(PicklerObject *self, PyObject *obj)
 
     if (_PyObject_LookupAttr((PyObject *)self, &_Py_ID(reducer_override),
                              &tmp) < 0) {
+      lmsg("dump error: _PyObject_LookupAttr returned < 0 \n");                                
       goto error;
     }
     /* Cache the reducer_override method, if it exists. */
@@ -4776,6 +5041,7 @@ dump(PicklerObject *self, PyObject *obj)
         Py_XSETREF(self->reducer_override, tmp);
     }
     else {
+        lmsg("dump tmp == NULL, reducer_override was called\n");
         Py_CLEAR(self->reducer_override);
     }
 
@@ -4785,21 +5051,29 @@ dump(PicklerObject *self, PyObject *obj)
         header[0] = PROTO;
         assert(self->proto >= 0 && self->proto < 256);
         header[1] = (unsigned char)self->proto;
-        if (_Pickler_Write(self, header, 2) < 0)
-            goto error;
+        if (_Pickler_Write(self, header, 2) < 0) {
+             goto error;
+        }
+           
         if (self->proto >= 4)
             self->framing = 1;
     }
 
     if (save(self, obj, 0) < 0 ||
         _Pickler_Write(self, &stop_op, 1) < 0 ||
-        _Pickler_CommitFrame(self) < 0)
-        goto error;
+        _Pickler_CommitFrame(self) < 0) {
+            lmsg("error in dump: save || picklerwrite || commitframe returned -1\n");
+            goto error;
+        }
+        
 
     // Success
+
+    lmsg("returning from dump, status set to 0!\n");
     status = 0;
 
   error:
+    lmsg("error in dump:\n");
     self->framing = 0;
 
     /* Break the reference cycle we generated at the beginning this function
@@ -4949,6 +5223,8 @@ Pickler_traverse(PicklerObject *self, visitproc visit, void *arg)
 static int
 Pickler_clear(PicklerObject *self)
 {
+    printf("tp clear for this object was invoked!!!\n");
+
     Py_CLEAR(self->output_buffer);
     Py_CLEAR(self->write);
     Py_CLEAR(self->pers_func);
@@ -8036,11 +8312,15 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
                    int fix_imports, PyObject *buffer_callback)
 /*[clinic end generated code: output=fbab0093a5580fdf input=e543272436c6f987]*/
 {
+
+    // printf("_fastpickle.c dumps implementation was called\n");
     PyObject *result;
     PicklerObject *pickler = _Pickler_New();
-
-    if (pickler == NULL)
+    if (pickler == NULL) {
         return NULL;
+    }
+
+        
 
     if (_Pickler_SetProtocol(pickler, protocol, fix_imports) < 0)
         goto error;
@@ -8048,11 +8328,16 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
     if (_Pickler_SetBufferCallback(pickler, buffer_callback) < 0)
         goto error;
 
-    if (dump(pickler, obj) < 0)
+    if (dump(pickler, obj) < 0) {
+        printf("dumps: dump function failed\n");
         goto error;
-
+    }
+        
+    
+    // printf("calling getstring on the final pickler object\n");
     result = _Pickler_GetString(pickler);
     Py_DECREF(pickler);
+    lmsg("returned from dump, returning result\n");
     return result;
 
   error:
@@ -8232,7 +8517,7 @@ pickle_traverse(PyObject *m, visitproc visit, void *arg)
 
 static struct PyModuleDef _picklemodule = {
     PyModuleDef_HEAD_INIT,
-    "_pickle",            /* m_name */
+    "_fastpickle",            /* m_name */
     pickle_module_doc,    /* m_doc */
     sizeof(PickleState),  /* m_size */
     pickle_methods,       /* m_methods */
@@ -8243,7 +8528,7 @@ static struct PyModuleDef _picklemodule = {
 };
 
 PyMODINIT_FUNC
-PyInit__pickle(void)
+PyInit__fastpickle(void)
 {
     PyObject *m;
     PickleState *st;
