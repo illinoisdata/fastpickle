@@ -30,7 +30,7 @@ void log_message(const char *format, ...) {
 
 
 ThreadPool* thread_pool_init(int thread_count, size_t initial_elements) {
-    printf("initialized a thread pool\n");
+    // printf("initialized a thread pool\n");
     
     ThreadPool *pool;
     int i;
