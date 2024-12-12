@@ -2896,7 +2896,7 @@ save_tuple(PicklerObject *self, PyObject *obj)
             /* Note that we pop one more than len, to remove
              * the MARK too.
              */
-            pthread_mutex_unlock(&memo_lock);
+            // pthread_mutex_unlock(&memo_lock);
             for (i = 0; i <= len; i++)
                 if (_Pickler_Write(self, &pop_op, 1) < 0)
                     return -1;
@@ -3101,7 +3101,7 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
 static int
 save_list(PicklerObject *self, PyObject *obj)
 {
-    printf("inside save_list\n");
+    // printf("inside save_list\n");
     char header[3];
     Py_ssize_t len;
     int status = 0;
@@ -3133,7 +3133,6 @@ save_list(PicklerObject *self, PyObject *obj)
         goto error;
     }
     pthread_mutex_unlock(&memo_lock);
-    printf("after memo put\n");
 
     if (len != 0) {
         /* Materialize the list elements. */
