@@ -37,7 +37,8 @@ enum {
     HIGHEST_PROTOCOL = 5,
     DEFAULT_PROTOCOL = 4
 };
-pthread_mutex_t memo_lock = PTHREAD_MUTEX_INITIALIZER;
+// pthread_mutex_t memo_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t memo_lock;
 
 #ifdef MS_WINDOWS
 // These are already typedefs from windows.h, pulled in via pycore_runtime.h.
@@ -3100,6 +3101,7 @@ batch_list_exact(PicklerObject *self, PyObject *obj)
 static int
 save_list(PicklerObject *self, PyObject *obj)
 {
+    printf("inside save_list\n");
     char header[3];
     Py_ssize_t len;
     int status = 0;
@@ -3131,6 +3133,7 @@ save_list(PicklerObject *self, PyObject *obj)
         goto error;
     }
     pthread_mutex_unlock(&memo_lock);
+    printf("after memo put\n");
 
     if (len != 0) {
         /* Materialize the list elements. */
@@ -4360,13 +4363,12 @@ save_reduce(PicklerObject *self, PyObject *args, PyObject *obj)
 static int
 save(PicklerObject *self, PyObject *obj, int pers_save)
 {
-    // printf("\nin save\n");
-    // PyObject_Print(obj, stdout, 0);
     PyTypeObject *type;
     PyObject *reduce_func = NULL;
     PyObject *reduce_value = NULL;
     int status = 0;
-
+    // PyObject_Print(obj, stderr, 0);
+    fprintf(stderr, "\n");
     if (_Pickler_OpcodeBoundary(self) < 0)
         return -1;
 
@@ -4381,7 +4383,7 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
         if ((status = save_pers(self, obj)) != 0)
             return status;
     }
-
+    
     type = Py_TYPE(obj);
 
     /* The old cPickle had an optimization that used switch-case statement
@@ -4563,6 +4565,7 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
         goto error;
 
   reduce:
+    fprintf(stderr, "inside reducer override\n");
     if (PyUnicode_Check(reduce_value)) {
         status = save_global(self, obj, reduce_value);
         goto done;
@@ -4582,7 +4585,7 @@ save(PicklerObject *self, PyObject *obj, int pers_save)
         status = -1;
     }
   done:
-
+    fprintf(stderr, "end of save\n");
     _Py_LeaveRecursiveCall();
     Py_XDECREF(reduce_func);
     Py_XDECREF(reduce_value);
@@ -4596,7 +4599,7 @@ dump(PicklerObject *self, PyObject *obj)
     const char stop_op = STOP;
     int status = -1;
     PyObject *tmp;
-
+    //is this thread safe?
     if (_PyObject_LookupAttr((PyObject *)self, &_Py_ID(reducer_override),
                              &tmp) < 0) {
       goto error;
@@ -8099,7 +8102,6 @@ typedef struct {
 
 void *process_element(void *arg) {
     ThreadData *data = (ThreadData *)arg;
-
     
     PicklerObject *pickler = _Pickler_New();
     if (pickler == NULL) {
@@ -8136,14 +8138,17 @@ void *process_element(void *arg) {
         data->result = result;
 
         pickler->memo = old_memo;
+        if (pickler) {
         Py_DECREF(pickler);
+        }
         
 
     error:
+        
+    if (pickler) {
         Py_DECREF(pickler);
-        pthread_exit(NULL);
-
-    // pthread_exit(NULL);
+    }
+    pthread_exit(NULL);
 }
 
 
@@ -8152,25 +8157,45 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
                    int fix_imports, PyObject *buffer_callback)
 /*[clinic end generated code: output=fbab0093a5580fdf input=e543272436c6f987]*/
 {
-    printf("inside C fastpickle!!!\n");
-    const int NUM_THREADS = 3;
-    pthread_t threads[NUM_THREADS];
-    ThreadData thread_data[NUM_THREADS];
+    if (pthread_mutex_init(&memo_lock, NULL) != 0) {
+        fprintf(stderr, "Failed to initialize mutex\n");
+        return NULL;
+    }
+
+    const int NUM_THREADS = PyList_Size(obj);
+    // pthread_t threads[NUM_THREADS];
+    // ThreadData thread_data[NUM_THREADS];
     PyMemoTable *common_memo = PyMemoTable_New();
     if (common_memo == NULL) {
         return PyErr_NoMemory();
     }
-    // Todo : put lock on common memo
+
+    pthread_t *threads = malloc(NUM_THREADS * sizeof(pthread_t));
+    if (threads == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    ThreadData *thread_data = malloc(NUM_THREADS * sizeof(ThreadData));
+    if (thread_data == NULL) {
+        free(threads); 
+        PyErr_NoMemory();
+        return NULL;
+    }
+    
     // todo : making get and put atomic
     for (int t = 0; t < NUM_THREADS; t++) {
-        // do i need to put a lock here?
+        
         thread_data[t].common_memo = common_memo;
         
         thread_data[t].obj = PyList_GetItem(obj, t);
-        // if (thread_data[t].obj == NULL) {
-        //     PyErr_SetString(PyExc_RuntimeError, "Failed to get element from obj");
-        //     goto error;
-        // }
+        // printf("ref count of obj initial: %i\n" ,thread_data[t].obj->ob_refcnt);
+        
+        Py_XINCREF(thread_data[t].obj);
+        if (thread_data[t].obj == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get element from obj");
+            goto error;
+        }
         thread_data[t].protocol = protocol;
         thread_data[t].fix_imports = fix_imports;
         thread_data[t].buffer_callback = buffer_callback;
@@ -8184,25 +8209,40 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
     }
 
     for (int t = 0; t < NUM_THREADS; t++) {
+        printf("joining threads\n");
         pthread_join(threads[t], NULL);
     }
 
     // Print results from all threads
-    printf("\nResults from all threads:\n");
+    
     for (int t = 0; t < NUM_THREADS; t++) {
         if (thread_data[t].result != NULL) {
             printf("Thread %d result: ", t);
             PyObject_Print(thread_data[t].result, stdout, 0);
             printf("\n");
-            Py_DECREF(thread_data[t].result);  // Clean up reference to the result
+            Py_DECREF(thread_data[t].result);
         } else {
             printf("Thread %d did not produce a result.\n", t);
+        }
+
+        if (thread_data[t].obj) {
+            Py_DECREF(thread_data[t].obj);
         }
     }
     
     pthread_mutex_destroy(&memo_lock);
-
+    if(common_memo!=NULL)
+    {
+        PyMemoTable_Del(common_memo);
+    }
+    free(threads);
+    free(thread_data);
     
+    return Py_None;
+
+    error:
+    free(threads);
+    free(thread_data);
     return Py_None;
 }
 
