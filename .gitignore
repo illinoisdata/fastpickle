@@ -8,6 +8,8 @@ __pycache__/
 
 # Additional file for local testing
 main.py
+core
+include/hashmap.h
 
 # Distribution / packaging
 .Python
