@@ -908,6 +908,23 @@ _PyMemoTable_ResizeTable(PyMemoTable *self, size_t min_size)
     return 0;
 }
 
+void print_object_id(PyObject *key) {
+    if (key == NULL) {
+        printf("Key is NULL\n");
+        return;
+    }
+    
+    PyObject *key_id = PyLong_FromVoidPtr((void *)key);
+
+    if (key_id != NULL) {
+        printf("Object ID (memo key): %p\n", (void *)PyLong_AsVoidPtr(key_id));
+        Py_DECREF(key_id);
+    } else {
+        printf("Failed to get object ID\n");
+    }
+}
+
+
 /* Returns NULL on failure, a pointer to the value otherwise. */
 static Py_ssize_t *
 PyMemoTable_Get(PyMemoTable *self, PyObject *key)
@@ -927,7 +944,7 @@ PyMemoTable_Set(PyMemoTable *self, PyObject *key, Py_ssize_t value)
     PyMemoEntry *entry;
 
     assert(key != NULL);
-
+    print_object_id(key);
     entry = _PyMemoTable_Lookup(self, key);
     if (entry->me_key != NULL) {
         entry->me_value = value;
@@ -7842,18 +7859,23 @@ static PyObject *pickle_in_process(PyObject *obj, PyObject *protocol, int fix_im
             _exit(EXIT_FAILURE);
 
         PyObject *result = _Pickler_GetString(pickler);
-        if (result) {
-            PyObject_Print(result, stdout, 0);
-            printf("\n");
+        // if (result) {
+        //     PyObject_Print(result, stdout, 0);
+        //     printf("\n");
+        // }
+        if (result == NULL) {
+            printf("Error!\n");
         }
+        Py_DECREF(obj);
 
         Py_DECREF(pickler);
         _exit(EXIT_SUCCESS);
     } else if (pid > 0) {
         // Parent process
         // Wait for the child process to finish
-        int status;
-        waitpid(pid, &status, 0);
+        // int status;
+        // waitpid(pid, &status, 0);
+        return pid;
     } else {
         // Fork failed
         perror("fork");
@@ -7876,12 +7898,37 @@ _pickle_dumps_impl(PyObject *module, PyObject *obj, PyObject *protocol,
     
     const int NUM_THREADS = PyList_Size(obj);
     
-    for (int i = 0; i < NUM_THREADS; i++) {
-        PyObject *sub_obj = PyList_GetItem(obj, i);  // Borrowed reference
-        Py_INCREF(sub_obj);  // Increment reference for safety
-        pickle_in_process(sub_obj, protocol, fix_imports, buffer_callback);
-        Py_DECREF(sub_obj);
+    // for (int i = 0; i < NUM_THREADS; i++) {
+    //     PyObject *sub_obj = PyList_GetItem(obj, i);  // Borrowed reference
+    //     Py_INCREF(sub_obj);  // Increment reference for safety
+    //     pickle_in_process(sub_obj, protocol, fix_imports, buffer_callback);
+    //     Py_DECREF(sub_obj);
+    // }
+
+    pid_t *child_pids = (pid_t *)malloc(NUM_THREADS * sizeof(pid_t));
+    if (child_pids == NULL) {
+        perror("malloc");
+        return;
     }
+    for (int i = 0; i < NUM_THREADS; i++) {
+        PyObject *sub_obj = PyList_GetItem(obj, i);
+        Py_INCREF(sub_obj);  // Increment reference count for sub_obj
+        int child_pid = pickle_in_process(sub_obj, protocol, fix_imports, buffer_callback);
+        child_pids[i] = child_pid;
+    }
+
+    // for (int i = 0; i < NUM_THREADS; i++) {
+    //     PyObject *sub_obj = PyList_GetItem(obj, i);
+    //     Py_INCREF(sub_obj); 
+    //     int child_pid = pickle_in_process(sub_obj, protocol, fix_imports, buffer_callback);
+    //     child_pids.push_back(child_pid);
+    //     // Py_DECREF(sub_obj);  // BUG: LET THE CHILD PROCESS DECREF THE SUB_OBJECT
+    // }
+    for (int i = 0; i < NUM_THREADS; i++) {
+        int status;
+        waitpid(child_pids[i], &status, 0);
+    }
+
     
     Py_DECREF(obj);
     Py_DECREF(protocol);
